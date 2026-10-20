@@ -115,6 +115,22 @@ src/
 
 ### 几个值得注意的点
 
+**格式支持有边界，踩到了会明确告诉你原因。** 实测结果：
+
+| 扩展名 | 状态 |
+| --- | --- |
+| `mp3` / `flac` / `wav` / `ogg` / `aac` / `aiff` | 正常 |
+| `m4a` / `mp4` / `mov` | 正常，**但要求 `moov` 在文件前部** |
+| `opus` | **不支持** |
+
+两个坑：
+
+1. **m4a 的 `moov` 必须在文件开头。** rodio 0.22 底层的 symphonia 解析不了 `moov` 在末尾的 MP4。`ffmpeg` 默认就是这么存的，所以它转出来的 m4a 一律放不了，需要 `ffmpeg -i in.m4a -c copy -movflags +faststart out.m4a` 转一下（`-c copy` 不重编码，无损且很快）。iTunes/手机录的通常本来就是前置的，不受影响。
+
+2. **Opus 无解。** rodio 0.22 没有任何 Opus 支持——它的 `lewton` 特性是 Vorbis 不是 Opus，symphonia 也不带 Opus codec。想支持得引入 `symphonia-adapter-libopus`（依赖 C 库 libopus，构建复杂度上一个台阶），termusic 就是这么做的。
+
+遇到解不了的曲目不会静默跳过，会在状态栏报出来并给出上面这些可操作的原因。
+
 **主循环是轮询的，不是阻塞读。** `main.rs` 把 stdin 丢进一个后台线程，用 `mpsc` 传回主线程，主循环 `recv_timeout(200ms)`。这样你在提示符前发呆时，进度条照样走、歌曲播完照样自动切下一首。渲染前先比对 `App::signature()`，状态没变就不重画，避免终端闪烁。
 
 **没有音频设备不会崩。** `Player::new` 拿不到默认设备时降级成静音模式，用自己的时钟走完时长。`--no-audio` 强制走这条路径，无头服务器上照样能开发和调试。
@@ -129,10 +145,16 @@ src/
 
 `rodio` 0.22（音频）、`serde` + `serde_json`（配置）、`walkdir`（递归扫描）、`dirs`（配置目录）、`anyhow`（错误）。
 
+另外有个 `examples/probe.rs`，直接调 rodio 解码器逐个文件探测采样率/声道/时长，遇到放不了的格式用它快速定位：
+
+```bash
+cargo run --release --example probe -- ~/Music/*
+```
+
 ## 开发
 
 ```bash
-cargo test              # 29 个单元测试
+cargo test              # 33 个单元测试
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 ```

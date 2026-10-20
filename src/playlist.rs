@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -36,6 +38,56 @@ impl Track {
     pub fn exists(&self) -> bool {
         self.path.is_file()
     }
+}
+
+const MP4_EXTS: &[&str] = &["m4a", "mp4", "m4b", "m4v", "mov", "aac_in_mp4"];
+
+pub fn is_mp4_container(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| MP4_EXTS.contains(&e.as_str()))
+}
+
+pub fn moov_at_end(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let Ok(total) = file.metadata().map(|m| m.len()) else {
+        return false;
+    };
+    let mut offset = 0u64;
+    let mut last_was_moov = false;
+    while offset + 8 <= total {
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return false;
+        }
+        let mut header = [0u8; 16];
+        let read = file.read(&mut header).unwrap_or(0);
+        if read < 8 {
+            break;
+        }
+        let raw = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let atype = &header[4..8];
+        let (header_len, size) = match raw {
+            0 => break,
+            1 => {
+                if read < 16 {
+                    break;
+                }
+                let mut ext = [0u8; 8];
+                ext.copy_from_slice(&header[8..16]);
+                (16u64, u64::from_be_bytes(ext))
+            }
+            n => (8u64, u64::from(n)),
+        };
+        if size < header_len {
+            break;
+        }
+        last_was_moov = atype == b"moov";
+        offset += size;
+    }
+    last_was_moov
 }
 
 pub fn is_audio(path: &Path) -> bool {
@@ -399,5 +451,63 @@ mod tests {
     fn missing_playlist_reports_an_error() {
         let dir = std::env::temp_dir().join("music_shell_test_absent");
         assert!(Playlist::load(&dir, "nothing").is_err());
+    }
+}
+
+#[cfg(test)]
+mod mp4_tests {
+    use super::*;
+
+    fn boxes(entries: &[(&[u8; 4], u64)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (typ, size) in entries {
+            let total = if *size == 0 {
+                out.len() as u64 + 8
+            } else {
+                *size
+            };
+            out.extend_from_slice(&(total as u32).to_be_bytes());
+            out.extend_from_slice(*typ);
+            out.resize(out.len() + (total as usize - 8), 0);
+        }
+        out
+    }
+
+    fn write(name: &str, data: &[u8]) -> PathBuf {
+        let dir = std::env::temp_dir().join("music_shell_test_mp4");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, data).unwrap();
+        path
+    }
+
+    #[test]
+    fn moov_at_end_is_detected() {
+        let data = boxes(&[(b"ftyp", 28), (b"free", 8), (b"mdat", 4096), (b"moov", 512)]);
+        let path = write("tail.m4a", &data);
+        assert!(moov_at_end(&path));
+    }
+
+    #[test]
+    fn moov_at_front_is_not_flagged() {
+        let data = boxes(&[(b"ftyp", 32), (b"moov", 512), (b"free", 8), (b"mdat", 4096)]);
+        let path = write("head.m4a", &data);
+        assert!(!moov_at_end(&path));
+    }
+
+    #[test]
+    fn a_truncated_or_bogus_file_is_not_flagged() {
+        let path = write("junk.m4a", b"short");
+        assert!(!moov_at_end(&path));
+        assert!(!moov_at_end(Path::new("/nope/none.m4a")));
+    }
+
+    #[test]
+    fn mp4_container_extensions_are_recognised() {
+        assert!(is_mp4_container(Path::new("a.m4a")));
+        assert!(is_mp4_container(Path::new("a.MP4")));
+        assert!(is_mp4_container(Path::new("a.mov")));
+        assert!(!is_mp4_container(Path::new("a.mp3")));
+        assert!(!is_mp4_container(Path::new("a.aac")));
     }
 }

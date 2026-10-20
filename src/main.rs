@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 
 use music_shell::config::{self, Config, Repeat, Theme};
 use music_shell::player::{Player, State};
-use music_shell::playlist::{self, Library, Playlist};
+use music_shell::playlist::{self, Library, Playlist, Track};
 
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[38;5;240m";
@@ -176,19 +176,39 @@ impl App {
     }
 
     fn play_cursor(&mut self) {
-        let Some(track) = self.lib.current().cloned() else {
-            self.status = "播放列表为空".into();
-            return;
-        };
-        if let Err(err) = self.player.play(&track) {
-            self.status = format!("播放失败: {err}");
-            if self.lib.len() > 1 {
-                self.lib.advance();
-                self.play_cursor();
+        let mut skipped: Vec<String> = Vec::new();
+        let total = self.lib.len().max(1);
+        for _ in 0..total {
+            let Some(track) = self.lib.current().cloned() else {
+                break;
+            };
+            match self.player.play(&track) {
+                Ok(()) => {
+                    self.status = if skipped.is_empty() {
+                        format!("正在播放 {}", track.title)
+                    } else {
+                        format!(
+                            "正在播放 {}（跳过 {} 首无法解码：{}）",
+                            track.title,
+                            skipped.len(),
+                            skipped.join("、")
+                        )
+                    };
+                    return;
+                }
+                Err(err) => {
+                    skipped.push(describe_failure(&track, &err));
+                    if self.lib.len() <= 1 || self.lib.advance().is_none() {
+                        break;
+                    }
+                }
             }
-            return;
         }
-        self.status = format!("正在播放 {}", track.title);
+        self.status = if skipped.is_empty() {
+            "播放列表为空".into()
+        } else {
+            format!("全部无法播放：{}", skipped.join("、"))
+        };
     }
 
     fn toggle_play(&mut self) {
@@ -558,6 +578,22 @@ fn split_arg(line: &str) -> (String, Option<&str>) {
         }
         None => (line.to_lowercase(), None),
     }
+}
+
+fn describe_failure(track: &Track, err: &anyhow::Error) -> String {
+    let name = &track.title;
+    if playlist::is_mp4_container(&track.path) && playlist::moov_at_end(&track.path) {
+        return format!(
+            "{name}（moov 在文件末尾，rodio 解析不了；用 ffmpeg -i in.m4a -c copy -movflags +faststart out.m4a 转换）"
+        );
+    }
+    if matches!(
+        track.path.extension().and_then(|e| e.to_str()),
+        Some("opus" | "oga")
+    ) {
+        return format!("{name}（{err}；rodio 0.22 不支持 Opus）");
+    }
+    format!("{name}（{err}）")
 }
 
 fn onoff(value: bool) -> &'static str {
