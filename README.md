@@ -153,10 +153,11 @@ EOF
   | 目标 | 产物 |
   | --- | --- |
   | `x86_64-unknown-linux-gnu` | `music-shell-x86_64-unknown-linux-gnu.tar.gz` |
-  | `x86_64-unknown-linux-musl` | `music-shell-x86_64-unknown-linux-musl.tar.gz`（静态） |
   | `aarch64-apple-darwin` | `music-shell-aarch64-apple-darwin.tar.gz` |
   | `x86_64-apple-darwin` | `music-shell-x86_64-apple-darwin.tar.gz` |
   | `x86_64-pc-windows-msvc` | `music-shell-x86_64-pc-windows-msvc.zip` |
+
+没有 musl 静态版：rodio 走 cpal → `alsa-sys`，ALSA 是 glibc 专属的，交叉编译到 musl 需要自建 ALSA sysroot。与其发一个静态但发不出声的二进制，不如只发动态链接版（目标机器 `apt install libasound2` 即可）。
 
 触发一次发布：
 

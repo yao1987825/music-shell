@@ -28,11 +28,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
             binary: music-shell
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            archive: tar.gz
-            binary: music-shell
-            static: true
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
@@ -54,12 +49,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config
-
-      - name: Install musl toolchain
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        uses: taiki-e/setup-cross-toolchain-action@v1
-        with:
-          target: ${{ matrix.target }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
