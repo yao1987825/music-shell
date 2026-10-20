@@ -1,0 +1,35 @@
+[package]
+name = "music-shell"
+version = "0.1.0"
+edition = "2024"
+description = "终端音乐播放器：JSON 配置驱动，菜单式交互，rodio 播放本地音频"
+license = "MIT"
+keywords = ["music", "player", "cli", "terminal", "tui"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[lib]
+name = "music_shell"
+path = "src/lib.rs"
+
+[[bin]]
+name = "music-shell"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+dirs = "7.0.0"
+rodio = { version = "0.22", default-features = false, features = [
+    "playback",
+    "mp3",
+    "flac",
+    "wav",
+    "vorbis",
+    "mp4",
+    "symphonia-aiff",
+] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+walkdir = "2.5.0"
+
+[profile.release]
+opt-level = 2

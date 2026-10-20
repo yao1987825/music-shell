@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag，例如 v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+            binary: music-shell
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+            binary: music-shell
+            static: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+            binary: music-shell
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+            binary: music-shell
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+            binary: music-shell.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux audio headers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Install musl toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        env:
+          BIN: ${{ matrix.binary }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          cp "target/${{ matrix.target }}/release/$BIN" .
+          printf '%s\n' \
+            '# music-shell' \
+            '' \
+            '用法: ./music-shell --help' \
+            '配置文件默认位于 ~/.config/music-shell/config.json' \
+            'Debian/Ubuntu 需要 ALSA 运行库: sudo apt install libasound2' \
+            > README.txt
+          tar czf "music-shell-${{ matrix.target }}.$ARCHIVE" "$BIN" README.txt
+          rm -f "$BIN" README.txt
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        run: |
+          Copy-Item "target/${{ matrix.target }}/release/music-shell.exe" .
+          Compress-Archive -Path music-shell.exe -DestinationPath "music-shell-${{ matrix.target }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: music-shell-${{ matrix.target }}
+          path: music-shell-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  publish:
+    name: attach to release
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: dist/*

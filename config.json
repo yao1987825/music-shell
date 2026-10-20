@@ -1,0 +1,15 @@
+{
+  "app_name": "music-shell",
+  "theme": "dark",
+  "volume": 70,
+  "library_path": "/home/you/Music",
+  "playlists_dir": "/home/you/.config/music-shell/playlists",
+  "auto_play": true,
+  "shuffle": false,
+  "repeat": "off",
+  "recent_playlists": ["favorites", "work"],
+  "window": {
+    "width": 80,
+    "height": 24
+  }
+}
