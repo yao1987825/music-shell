@@ -57,9 +57,9 @@ pub fn run(check_only: bool, retries: usize) -> Result<()> {
 
     let binary_name = binary_name_in(&asset_name);
     let executable = if asset_name.ends_with(".zip") {
-        extract_from_zip(&archive, &binary_name)?
+        extract_from_zip(&archive, binary_name)?
     } else {
-        extract_binary(&archive, &binary_name)?
+        extract_binary(&archive, binary_name)?
     };
     println!("已解出二进制（{} 字节）", executable.len());
 
