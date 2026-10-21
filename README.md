@@ -116,13 +116,17 @@ src/
 
 职责划分：
 
-| 模块 | 职责 |
-| --- | --- |
-| `App`（main.rs） | 只管状态和控制：应用命令、推进播放状态机 |
-| `Renderer`（render.rs） | 只管画：把状态渲染成字符串，增量更新 |
-| `Command`（command.rs） | 只管解析：输入 → 结构化命令，不碰状态 |
-| `Player`（player.rs） | 只管播放：设备、解码、时钟，不碰 UI |
-| `Capability`（capability.rs） | 只管判定：这个文件能不能放、为什么不能 |
+| 模块 | 职责 | 不知道的东西 |
+| --- | --- | --- |
+| `main.rs` | 启动和退出 | 一切业务细节 |
+| `App`（app.rs） | 状态流转 | 怎么画、怎么解析 |
+| `Renderer`（renderer.rs） | 画 | 播放器状态怎么来的 |
+| `Command`（command.rs） | 解析 | 命令会造成什么后果 |
+| `Library`（library.rs） | 音乐库和队列 | 音频怎么放、界面怎么画 |
+| `Player`（player.rs） | 播放状态机 | 界面长什么样 |
+| `Capability`（capability.rs） | 格式判定 | 什么都不关心 |
+
+依赖方向是单向的：`main → app → {command, renderer, library, player, config}`，下层不回头引用上层。
 
 `lib` + `bin` 拆分是为了能跑单元测试（`cargo test`）并让别的 crate 复用这几块逻辑。
 
@@ -232,7 +236,7 @@ fn 例子() {
 ## 开发
 
 ```bash
-cargo test              # 67 个单元测试
+cargo test              # 74 个单元测试
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 ```

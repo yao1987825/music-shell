@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::playlist::moov_at_end;
+use crate::library::moov_at_end;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {

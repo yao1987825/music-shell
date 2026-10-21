@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player as RodioPlayer, Source};
 
-use crate::playlist::Track;
+use crate::library::Track;
 
 pub const SILENCE_EPSILON: Duration = Duration::from_millis(250);
 pub const DRIFT_TOLERANCE: Duration = Duration::from_millis(400);
@@ -61,6 +61,14 @@ impl State {
             Self::Playing => "playing",
             Self::Paused => "paused",
         }
+    }
+
+    pub fn is_playing(self) -> bool {
+        matches!(self, Self::Playing)
+    }
+
+    pub fn is_active(self) -> bool {
+        !matches!(self, Self::Stopped)
     }
 }
 
@@ -150,39 +158,65 @@ impl Player {
             player.play();
         }
         self.duration = duration;
-        self.clock.restart();
-        self.state = State::Playing;
+        self.state = State::Stopped;
+        self.transition(State::Playing);
         Ok(())
     }
 
     pub fn toggle_pause(&mut self) {
-        match self.state {
-            State::Playing => {
+        let next = match self.state {
+            State::Playing => State::Paused,
+            State::Paused => State::Playing,
+            State::Stopped => return,
+        };
+        self.transition(next);
+    }
+
+    /// 状态机的唯一入口。非法转移被拒绝并返回 false。
+    pub fn transition(&mut self, next: State) -> bool {
+        let valid = matches!(
+            (self.state, next),
+            (State::Stopped, State::Playing)
+                | (State::Playing, State::Paused)
+                | (State::Paused, State::Playing)
+                | (State::Playing, State::Stopped)
+                | (State::Paused, State::Stopped)
+        );
+        if !valid {
+            return false;
+        }
+        match (self.state, next) {
+            (_, State::Playing) => {
+                if self.state == State::Stopped {
+                    self.clock.restart();
+                } else {
+                    self.clock.resume();
+                }
+                if let Some(player) = &self.rodio {
+                    player.play();
+                }
+            }
+            (_, State::Paused) => {
                 self.clock.pause();
                 if let Some(player) = &self.rodio {
                     player.pause();
                 }
-                self.state = State::Paused;
             }
-            State::Paused => {
-                self.clock.resume();
+            (_, State::Stopped) => {
+                self.clock.reset();
+                self.duration = Duration::ZERO;
                 if let Some(player) = &self.rodio {
-                    player.play();
+                    player.clear();
+                    player.stop();
                 }
-                self.state = State::Playing;
             }
-            State::Stopped => {}
         }
+        self.state = next;
+        true
     }
 
     pub fn stop(&mut self) {
-        if let Some(player) = &self.rodio {
-            player.clear();
-            player.stop();
-        }
-        self.state = State::Stopped;
-        self.clock.reset();
-        self.duration = Duration::ZERO;
+        self.transition(State::Stopped);
     }
 
     pub fn position(&self) -> Duration {
@@ -470,5 +504,74 @@ mod clock_tests {
         let before = p.position();
         p.tick();
         assert_eq!(p.position(), before);
+    }
+}
+
+#[cfg(test)]
+mod state_machine_tests {
+    use super::*;
+
+    fn silent() -> Player {
+        Player::new(1.0, true)
+    }
+
+    #[test]
+    fn stopped_cannot_go_straight_to_paused() {
+        let mut p = silent();
+        assert!(!p.transition(State::Paused), "Stopped -> Paused 应被拒绝");
+        assert_eq!(p.state(), State::Stopped);
+    }
+
+    #[test]
+    fn playing_cannot_go_straight_to_playing() {
+        let mut p = silent();
+        assert!(p.transition(State::Playing));
+        assert!(!p.transition(State::Playing), "Playing -> Playing 应被拒绝");
+        assert_eq!(p.state(), State::Playing);
+    }
+
+    #[test]
+    fn the_legal_transitions_are_accepted() {
+        let mut p = silent();
+        assert!(p.transition(State::Playing));
+        assert!(p.transition(State::Paused));
+        assert!(p.transition(State::Playing));
+        assert!(p.transition(State::Stopped));
+        assert_eq!(p.state(), State::Stopped);
+    }
+
+    #[test]
+    fn a_paused_player_can_go_straight_to_stopped() {
+        let mut p = silent();
+        p.transition(State::Playing);
+        p.transition(State::Paused);
+        assert!(p.transition(State::Stopped));
+        assert_eq!(p.position(), Duration::ZERO);
+    }
+
+    #[test]
+    fn stopping_resets_the_clock_and_duration() {
+        let mut p = silent();
+        p.transition(State::Playing);
+        std::thread::sleep(Duration::from_millis(120));
+        p.stop();
+        assert_eq!(p.position(), Duration::ZERO);
+        assert_eq!(p.duration(), Duration::ZERO);
+        assert_eq!(p.state(), State::Stopped);
+    }
+
+    #[test]
+    fn toggle_pause_is_a_no_op_when_stopped() {
+        let mut p = silent();
+        p.toggle_pause();
+        assert_eq!(p.state(), State::Stopped);
+    }
+
+    #[test]
+    fn state_predicates_behave() {
+        assert!(State::Playing.is_playing());
+        assert!(!State::Paused.is_playing());
+        assert!(State::Paused.is_active());
+        assert!(!State::Stopped.is_active());
     }
 }
