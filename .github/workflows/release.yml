@@ -1,14 +1,26 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "版本号怎么升（none = 用 Cargo.toml 里现有的版本）"
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - patch
+          - minor
+          - major
+      dry-run:
+        description: "只做检查和构建，不提交、不发布"
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "要发布的 tag，例如 v0.1.0"
-        required: true
 
 permissions:
   contents: write
@@ -18,35 +30,82 @@ env:
 
 jobs:
   meta:
-    name: 解析版本
+    name: 定版本、打 tag
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.ver.outputs.version }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      publish: ${{ steps.plan.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
-      - name: 以 tag 为准确定版本
-        id: ver
+        with:
+          fetch-depth: 0
+
+      - name: 定出版本号并按需更新 Cargo.toml
+        id: plan
         run: |
-          tag="${{ github.ref_name }}"
-          version="${tag#v}"
-          if [ -z "$version" ]; then
-            echo "::error::无法从 ref $tag 解析出版本号"
-            exit 1
+          set -euo pipefail
+          declared=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "Cargo.toml 当前版本: $declared"
+
+          trigger="${{ github.event_name }}"
+          if [ "$trigger" = "push" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            echo "由 tag 触发，版本取自 tag: $version"
+          else
+            case "${{ inputs.bump }}" in
+              major) version=$(python3 -c "import sys;m=sys.argv[1].split('.');print(f'{int(m[0])+1}.0.0')" "$declared") ;;
+              minor) version=$(python3 -c "import sys;m=sys.argv[1].split('.');print(f'{m[0]}.{int(m[1])+1}.0')" "$declared") ;;
+              patch) version=$(python3 -c "import sys;m=sys.argv[1].split('.');print(f'{m[0]}.{m[1]}.{int(m[2])+1}')" "$declared") ;;
+              *)    version="$declared" ;;
+            esac
+            echo "本次发布版本: $version"
+            if [ "$version" != "$declared" ]; then
+              python3 scripts/set-version.py "$version"
+              git config user.name "github-actions[bot]"
+
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git add Cargo.toml Cargo.lock
+              git commit -m "版本号 $declared → $version"
+              if [ "${{ inputs.dry-run }}" = "true" ]; then
+                echo "dry-run：不推送"
+              else
+                git push origin HEAD:main
+                echo "已推送版本变更"
+              fi
+            fi
+          fi
+
+          tag="v$version"
+          publish=true
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag 已存在，跳过发布"
+            publish=false
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "产物版本: $version（来自 tag $tag）"
-      - name: 对比 Cargo.toml，有漂移只提示不拦截
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+      - name: 创建 tag（不存在才建）
+        if: steps.plan.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
         run: |
-          declared=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          if [ "$declared" != "${{ steps.ver.outputs.version }}" ]; then
-            echo "::warning::Cargo.toml 写的是 $declared，但 tag 是 ${{ steps.ver.outputs.version }}。产物按 tag 走（${{ steps.ver.outputs.version }}）。"
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "tag $TAG 已存在"
           else
-            echo "Cargo.toml 与 tag 一致"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "release $TAG"
+            git push origin "$TAG"
+            echo "已创建并推送 tag $TAG"
           fi
 
   release:
-    needs: meta
     name: build and publish
+    needs: meta
+    if: needs.meta.outputs.publish == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -91,6 +150,18 @@ jobs:
           MS_VERSION: ${{ needs.meta.outputs.version }}
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: 校验产物里的版本号和 tag 一致
+        if: runner.os != 'Windows'
+        env:
+          EXPECTED: ${{ needs.meta.outputs.version }}
+        run: |
+          got=$(./music-shell --version | awk '{print $2}')
+          if [ "$got" != "$EXPECTED" ]; then
+            echo "::error::产物版本是 $got，但应该是 $EXPECTED"
+            exit 1
+          fi
+          echo "产物版本 $got，与 tag 一致"
+
       - name: Package (unix)
         if: runner.os != 'Windows'
         env:
@@ -114,18 +185,6 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/music-shell.exe" .
           Compress-Archive -Path music-shell.exe -DestinationPath "music-shell-${{ matrix.target }}.zip"
 
-      - name: 校验产物里的版本号和 tag 一致
-        if: runner.os != 'Windows'
-        env:
-          EXPECTED: ${{ needs.meta.outputs.version }}
-        run: |
-          got=$(./music-shell --version | awk '{print $2}')
-          if [ "$got" != "$EXPECTED" ]; then
-            echo "::error::产物版本是 $got，但 tag 版本是 $EXPECTED"
-            exit 1
-          fi
-          echo "产物版本 $got，与 tag 一致"
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -135,9 +194,12 @@ jobs:
 
   publish:
     name: attach to release
-    needs: release
+    needs: [meta, release]
+    if: needs.meta.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -146,11 +208,7 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: ${{ needs.meta.outputs.tag }}
+          name: ${{ needs.meta.outputs.tag }}
           body_path: RELEASE_NOTES.md
           files: dist/*
-      - name: 附加自动生成的变更日志
-        if: always()
-        continue-on-error: true
-        run: gh release view "${{ github.ref_name }}" >/dev/null 2>&1 || true
