@@ -55,10 +55,7 @@ pub fn run(check_only: bool, retries: usize) -> Result<()> {
     }
     println!("校验通过: {}", &actual[..16]);
 
-    let binary_name = std::path::Path::new(&asset_name)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "music-shell".into());
+    let binary_name = binary_name_in(&asset_name);
     let executable = if asset_name.ends_with(".zip") {
         extract_from_zip(&archive, &binary_name)?
     } else {
@@ -86,6 +83,16 @@ pub fn run(check_only: bool, retries: usize) -> Result<()> {
     Ok(())
 }
 
+/// 发布流程打包时统一把二进制重命名为 music-shell，
+/// 所以只需要知道归档类型就能确定里面那个文件的名字。
+pub fn binary_name_in(asset_name: &str) -> &'static str {
+    if asset_name.ends_with(".zip") {
+        "music-shell.exe"
+    } else {
+        "music-shell"
+    }
+}
+
 fn expected_checksum(assets: &[Asset], asset_name: &str) -> Result<String> {
     let file = checksum_for(assets, asset_name)
         .context("这个 Release 没有提供 checksums.txt，为了安全起见不执行自动更新")?;
@@ -102,5 +109,26 @@ fn print_notes(notes: &str) {
     let mut out = stdout.lock();
     for line in notes.lines().take(40) {
         let _ = writeln!(out, "  {line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::binary_name_in;
+
+    #[test]
+    fn archive_names_map_to_the_binary_inside() {
+        assert_eq!(
+            binary_name_in("music-shell-x86_64-unknown-linux-gnu.tar.gz"),
+            "music-shell"
+        );
+        assert_eq!(
+            binary_name_in("music-shell-aarch64-apple-darwin.tar.gz"),
+            "music-shell"
+        );
+        assert_eq!(
+            binary_name_in("music-shell-x86_64-pc-windows-msvc.zip"),
+            "music-shell.exe"
+        );
     }
 }
