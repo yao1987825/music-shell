@@ -150,18 +150,6 @@ jobs:
           MS_VERSION: ${{ needs.meta.outputs.version }}
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: 校验产物里的版本号和 tag 一致
-        if: runner.os != 'Windows'
-        env:
-          EXPECTED: ${{ needs.meta.outputs.version }}
-        run: |
-          got=$(./music-shell --version | awk '{print $2}')
-          if [ "$got" != "$EXPECTED" ]; then
-            echo "::error::产物版本是 $got，但应该是 $EXPECTED"
-            exit 1
-          fi
-          echo "产物版本 $got，与 tag 一致"
-
       - name: Package (unix)
         if: runner.os != 'Windows'
         env:
@@ -184,6 +172,18 @@ jobs:
         run: |
           Copy-Item "target/${{ matrix.target }}/release/music-shell.exe" .
           Compress-Archive -Path music-shell.exe -DestinationPath "music-shell-${{ matrix.target }}.zip"
+
+      - name: 校验产物里的版本号和 tag 一致
+        if: runner.os != 'Windows'
+        env:
+          EXPECTED: ${{ needs.meta.outputs.version }}
+        run: |
+          got=$(./music-shell --version | awk '{print $2}')
+          if [ "$got" != "$EXPECTED" ]; then
+            echo "::error::产物版本是 $got，但应该是 $EXPECTED"
+            exit 1
+          fi
+          echo "产物版本 $got，与 tag 一致"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
