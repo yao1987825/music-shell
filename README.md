@@ -18,7 +18,32 @@ music-shell 静音模式
 输入命令 (? 看帮助, q 退出) ›
 ```
 
-## 编译
+## 安装
+
+**直接下载 Release**（推荐，四个平台预编译）：
+
+| 平台 | 产物 |
+| --- | --- |
+| Linux x86_64 | `music-shell-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux x86_64 静态 | 无（ALSA 是 glibc 专属的，见「已知限制」） |
+| macOS Apple Silicon | `music-shell-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `music-shell-x86_64-apple-darwin.tar.gz` |
+| Windows x64 | `music-shell-x86_64-pc-windows-msvc.zip` |
+
+```bash
+tar xzf music-shell-x86_64-unknown-linux-gnu.tar.gz
+sudo install -m755 music-shell ~/.local/bin/
+```
+
+**从源码装**：
+
+```bash
+cargo install --path .
+```
+
+装到 `~/.cargo/bin`，需要 ALSA 运行库（`libasound2`，Debian/Ubuntu 一般已预装）。
+
+**手动编译**：
 
 Debian 需要先装 ALSA 头文件，rodio 靠它链接 `libasound`：
 
@@ -63,6 +88,8 @@ cargo build --release
 
 首次运行会在 `~/.config/music-shell/config.json` 生成一份默认配置，之后用 `w` 命令回写。
 
+首次运行生成的默认配置长这样（和 `--print-config` 的输出逐字段一致）：
+
 ```json
 {
   "app_name": "music-shell",
@@ -70,10 +97,10 @@ cargo build --release
   "volume": 70,
   "library_path": "/home/you/Music",
   "playlists_dir": "/home/you/.config/music-shell/playlists",
-  "auto_play": true,
+  "auto_play": false,
   "shuffle": false,
   "repeat": "off",
-  "recent_playlists": ["favorites", "work"],
+  "recent_playlists": [],
   "window": { "width": 80, "height": 24 }
 }
 ```
@@ -258,6 +285,10 @@ cargo clippy --all-targets -- -D warnings
 { "library_path": "/data/music_rust/testdata", "volume": 70 }
 EOF
 ```
+
+## 发布说明
+
+每个 Release 的说明模板见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，覆盖支持格式、Linux 依赖、运行方式和已知限制。
 
 ## CI 与发布
 

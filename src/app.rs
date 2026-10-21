@@ -57,6 +57,12 @@ impl App {
 
     pub fn scan_library(&mut self) {
         let path = self.cfg.library_path.clone();
+        if !path.exists()
+            && let Err(err) = std::fs::create_dir_all(&path)
+        {
+            self.status = format!("无法创建音乐库目录 {}: {err}", path.display());
+            return;
+        }
         let result = library::scan_with_options(&path, library::ScanOptions::default());
         let count = result.tracks.len();
         let unsupported = result.unsupported.len();
