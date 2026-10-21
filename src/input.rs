@@ -269,72 +269,91 @@ fn trailing_incomplete(data: &[u8]) -> usize {
     0
 }
 
-// termios 的 lflag 位
-const ECHO: u32 = 0o10;
-const ICANON: u32 = 0o2;
-const ECHOE: u32 = 0o20;
-const ECHOK: u32 = 0o40;
-const ECHONL: u32 = 0o100;
-const IEXTEN: u32 = 0o100000;
-const TCSANOW: i32 = 0;
+/// termios 相关代码只在 Unix 上存在，Windows 用不到。
+#[cfg(unix)]
+mod raw {
+    // c_lflag 的位标志
+    pub const ECHO: u32 = 0o10;
+    pub const ICANON: u32 = 0o2;
+    pub const ECHOE: u32 = 0o20;
+    pub const ECHOK: u32 = 0o40;
+    pub const ECHONL: u32 = 0o100;
+    pub const IEXTEN: u32 = 0o100000;
+    const TCSANOW: i32 = 0;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Termios {
-    c_iflag: u32,
-    c_oflag: u32,
-    c_cflag: u32,
-    c_lflag: u32,
-    c_line: u8,
-    c_cc: [u8; 32],
-    c_ispeed: u32,
-    c_ospeed: u32,
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct Termios {
+        pub c_iflag: u32,
+        pub c_oflag: u32,
+        pub c_cflag: u32,
+        pub c_lflag: u32,
+        pub c_line: u8,
+        pub c_cc: [u8; 32],
+        pub c_ispeed: u32,
+        pub c_ospeed: u32,
+    }
+
+    unsafe extern "C" {
+        pub fn tcgetattr(fd: i32, termios: *mut Termios) -> i32;
+        pub fn tcsetattr(fd: i32, optional_actions: i32, termios: *const Termios) -> i32;
+    }
+
+    pub static SAVED: std::sync::Mutex<Option<Termios>> = std::sync::Mutex::new(None);
+
+    pub fn enable() {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            return;
+        }
+        let mut current: Termios = unsafe { std::mem::zeroed() };
+        if unsafe { tcgetattr(0, &mut current) } != 0 {
+            return;
+        }
+        {
+            let Ok(mut guard) = SAVED.lock() else {
+                return;
+            };
+            if guard.is_some() {
+                return;
+            }
+            *guard = Some(current);
+        }
+        let mut raw_mode = current;
+        raw_mode.c_lflag &= !(ICANON | ECHO | ECHOE | ECHOK | ECHONL | IEXTEN);
+        unsafe {
+            tcsetattr(0, TCSANOW, &raw_mode);
+        }
+    }
+
+    pub fn restore() {
+        let Ok(mut guard) = SAVED.lock() else {
+            return;
+        };
+        if let Some(original) = guard.take() {
+            unsafe {
+                tcsetattr(0, TCSANOW, &original);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub const ALL_FLAGS: [u32; 6] = [ECHO, ICANON, ECHOE, ECHOK, ECHONL, IEXTEN];
 }
-
-unsafe extern "C" {
-    fn tcgetattr(fd: i32, termios: *mut Termios) -> i32;
-    fn tcsetattr(fd: i32, optional_actions: i32, termios: *const Termios) -> i32;
-}
-
-static SAVED: std::sync::Mutex<Option<Termios>> = std::sync::Mutex::new(None);
 
 /// 把终端切到"逐字节立即交付"模式。
 ///
 /// 必须去掉 ICANON：规范模式下内核会一直缓冲到换行才给应用，
-/// 方向键这类不���换行的键就永远读不到。同时去掉 ECHO，
+/// 方向键这类不发换行的键就永远读不到。同时去掉 ECHO，
 /// 免得 ^[ 之类被回显到命令行里。ISIG 保留，Ctrl-C 仍然有效。
 pub fn enable_raw_input() {
-    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        return;
-    }
-    let mut current: Termios = unsafe { std::mem::zeroed() };
-    if unsafe { tcgetattr(0, &mut current) } != 0 {
-        return;
-    }
-    if SAVED.lock().map(|g| g.is_some()).unwrap_or(true) {
-        return;
-    }
-    if let Ok(mut guard) = SAVED.lock() {
-        *guard = Some(current);
-    }
-    let mut raw = current;
-    raw.c_lflag &= !(ICANON | ECHO | ECHOE | ECHOK | ECHONL | IEXTEN);
-    unsafe {
-        tcsetattr(0, TCSANOW, &raw);
-    }
+    #[cfg(unix)]
+    raw::enable();
 }
 
 /// 退出前恢复终端原状，否则关掉程序后 shell 会没有回显。
 pub fn restore_terminal() {
-    let original = match SAVED.lock() {
-        Ok(mut guard) => guard.take(),
-        Err(_) => None,
-    };
-    if let Some(original) = original {
-        unsafe {
-            tcsetattr(0, TCSANOW, &original);
-        }
-    }
+    #[cfg(unix)]
+    raw::restore();
 }
 
 pub fn print_out(text: &str) {
@@ -493,9 +512,10 @@ mod raw_mode_tests {
         restore_terminal();
     }
 
+    #[cfg(unix)]
     #[test]
     fn termios_bit_constants_are_distinct() {
-        let bits = [ECHO, ICANON, ECHOE, ECHOK, ECHONL, IEXTEN];
+        let bits = raw::ALL_FLAGS;
         for (i, a) in bits.iter().enumerate() {
             for b in &bits[i + 1..] {
                 assert_eq!(a & b, 0, "位标志 {a:#o} 与 {b:#o} 有重叠");
