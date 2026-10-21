@@ -5,3 +5,5 @@ pub mod config;
 pub mod library;
 pub mod player;
 pub mod renderer;
+pub mod update;
+pub mod update_cmd;

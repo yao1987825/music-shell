@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.104"
 dirs = "7.0.0"
+flate2 = "1.1.10"
 rand = "0.9"
 rodio = { version = "0.22", default-features = false, features = [
     "playback",
@@ -30,8 +31,12 @@ rodio = { version = "0.22", default-features = false, features = [
 ] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11.1"
+tar = "0.4.46"
 terminal_size = "0.4.4"
+ureq = { version = "3.4.2", features = ["rustls", "json", "socks-proxy"] }
 walkdir = "2.5.0"
+zip = "9.0.5"
 
 [profile.release]
 opt-level = 2

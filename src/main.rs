@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use music_shell::app::App;
 use music_shell::config::{self, Config};
@@ -20,6 +20,9 @@ fn main() -> ExitCode {
 #[derive(Debug)]
 struct Args {
     config: PathBuf,
+    update: bool,
+    update_check: bool,
+    retries: usize,
     playlist: Option<String>,
     no_audio: bool,
     print_config: bool,
@@ -38,6 +41,9 @@ where
 {
     let mut args = Args {
         config: config::default_path(),
+        update: false,
+        update_check: false,
+        retries: 3,
         playlist: None,
         no_audio: false,
         print_config: false,
@@ -49,6 +55,16 @@ where
         match arg.as_str() {
             "-h" | "--help" => args.help = true,
             "-V" | "--version" => args.version = true,
+            "update" => args.update = true,
+            "--check" => args.update_check = true,
+            "--retries" => {
+                let Some(value) = raw.next() else {
+                    bail!("--retries 需要一个数字");
+                };
+                args.retries = value
+                    .parse()
+                    .with_context(|| format!("--retries 的值不合法: {value}"))?;
+            }
             "--no-audio" => args.no_audio = true,
             "--print-config" => args.print_config = true,
             "--config" => {
@@ -96,7 +112,16 @@ fn usage() {
   --no-audio            静音模式：只走状态机，不开音频设备
   --print-config        打印当前配置后退出
   -h, --help            显示用法
-  -V, --version         显示版本号",
+  -V, --version         显示版本号
+
+自更新:
+  update                检查并安装新版本（自动校验 SHA256）
+  update --check        只检查有没有新版本，不下载
+  --retries <n>         网络失败重试次数（默认 3）
+
+可用环境变量:
+  HTTPS_PROXY / ALL_PROXY   访问 GitHub 走代理时设置
+  MUSIC_SHELL_UPDATE_URL    自定义 API 地址（走镜像时用）",
         config::default_path().display()
     );
 }
@@ -109,6 +134,11 @@ fn run() -> Result<()> {
     }
     if args.version {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("MS_VERSION"));
+        return Ok(());
+    }
+
+    if args.update {
+        music_shell::update_cmd::run(args.update_check, args.retries)?;
         return Ok(());
     }
 

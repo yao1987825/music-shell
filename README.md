@@ -55,6 +55,33 @@ cargo build --release
 
 没声卡（服务器 / SSH）也能跑，加 `--no-audio` 走静音模式，状态机和进度照常工作。
 
+## 自更新
+
+```bash
+music-shell update            # 检查并安装新版本
+music-shell update --check    # 只看有没有新版本，不下载
+music-shell update --retries 5   # 网络不好时多试几次
+```
+
+流程：查 GitHub 最新 Release → 按当前平台挑产物 → 下载 → **校验 SHA256**
+→ 解压 → 写临时文件 → 原子替换。校验和不匹配会直接中止，不会装上。
+
+Release 必须带 `checksums.txt`，没有的话命令会拒绝自动安装并提示手动下载。
+
+Windows 上无法覆盖正在运行的 exe，会提示手动下载。
+
+**走代理或镜像**
+
+```bash
+export HTTPS_PROXY=socks5://192.168.6.1:1070   # 或 ALL_PROXY
+music-shell update
+
+export MUSIC_SHELL_UPDATE_URL=https://mirror.example.com   # 自定义 API
+music-shell update
+```
+
+没设代理就是直连。GitHub 在部分网络下不稳，命令默认重试 3 次。
+
 ## 命令
 
 | 命令 | 作用 |
@@ -212,6 +239,7 @@ cargo run --release --example probe -- ~/Music/*
 - **格式判定基于扩展名。** 一个 `.mp3` 扩展名里装的是 AAC 流这种情况，扫描时发现不了，只在播放时报解码错误。
 - **没有音频标签。** 曲名取自文件名，艺术家取自父目录名，不读 ID3/Vorbis 标签。
 - **SSH 断开进程即终止。** 长期跑请用 tmux 或 systemd --user。
+- **自更新只支持 Linux/macOS。** Windows 不能覆盖正在运行的 exe。
 - **纯终端界面。** 没有鼠标支持，没有 TUI 组件库依赖。
 
 ## 未来计划
@@ -273,7 +301,7 @@ fn 例子() {
 ## 开发
 
 ```bash
-cargo test              # 97 个单元测试
+cargo test              # 113 个单元测试
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 ```
