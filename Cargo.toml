@@ -1,6 +1,6 @@
 [package]
 name = "music-shell"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 description = "终端音乐播放器：JSON 配置驱动，菜单式交互，rodio 播放本地音频"
 license = "MIT"

@@ -54,9 +54,10 @@ cargo build --release
 | 参数 | 说明 |
 | --- | --- |
 | `--config <路径>` | 指定配置文件，默认 `~/.config/music-shell/config.json` |
-| `--playlist <名字>` | 启动时加载某个播放列表 |
+| `--playlist <名字>` | 启动时加载某个播放列表（也可用 `--playlist=名字`） |
 | `--no-audio` | 静音模式，不开音频设备 |
 | `--print-config` | 打印当前配置后退出 |
+| `-V, --version` | 显示版本号 |
 
 ## 配置
 
@@ -236,7 +237,7 @@ fn 例子() {
 ## 开发
 
 ```bash
-cargo test              # 74 个单元测试
+cargo test              # 84 个单元测试
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 ```

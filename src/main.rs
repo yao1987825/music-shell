@@ -17,26 +17,38 @@ fn main() -> ExitCode {
     }
 }
 
+#[derive(Debug)]
 struct Args {
     config: PathBuf,
     playlist: Option<String>,
     no_audio: bool,
     print_config: bool,
     help: bool,
+    version: bool,
 }
 
 fn parse_args() -> Result<Args> {
+    parse_from(std::env::args().skip(1))
+}
+
+fn parse_from<I, S>(raw: I) -> Result<Args>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
     let mut args = Args {
         config: config::default_path(),
         playlist: None,
         no_audio: false,
         print_config: false,
         help: false,
+        version: false,
     };
-    let mut raw = std::env::args().skip(1);
+    let mut raw = raw.into_iter().map(Into::into);
     while let Some(arg) = raw.next() {
         match arg.as_str() {
             "-h" | "--help" => args.help = true,
+            "-V" | "--version" => args.version = true,
             "--no-audio" => args.no_audio = true,
             "--print-config" => args.print_config = true,
             "--config" => {
@@ -45,8 +57,25 @@ fn parse_args() -> Result<Args> {
                 };
                 args.config = PathBuf::from(value);
             }
+            "--playlist" => {
+                let Some(value) = raw.next() else {
+                    bail!("--playlist 需要一个播放列表名字");
+                };
+                args.playlist = Some(value);
+            }
             other if other.starts_with("--config=") => {
-                args.config = PathBuf::from(&other["--config=".len()..]);
+                let value = &other["--config=".len()..];
+                if value.is_empty() {
+                    bail!("--config= 需要一个路径参数");
+                }
+                args.config = PathBuf::from(value);
+            }
+            other if other.starts_with("--playlist=") => {
+                let value = &other["--playlist=".len()..];
+                if value.is_empty() {
+                    bail!("--playlist= 需要一个播放列表名字");
+                }
+                args.playlist = Some(value.to_string());
             }
             other => bail!("未知参数: {other}（用 --help 查看用法）"),
         }
@@ -66,7 +95,8 @@ fn usage() {
   --playlist <名字>     启动时加载某个播放列表
   --no-audio            静音模式：只走状态机，不开音频设备
   --print-config        打印当前配置后退出
-  -h, --help            显示用法",
+  -h, --help            显示用法
+  -V, --version         显示版本号",
         config::default_path().display()
     );
 }
@@ -75,6 +105,10 @@ fn run() -> Result<()> {
     let args = parse_args()?;
     if args.help {
         usage();
+        return Ok(());
+    }
+    if args.version {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
@@ -100,4 +134,87 @@ fn run() -> Result<()> {
     }
 
     app.repl()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args> {
+        parse_from(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn playlist_can_be_given_as_two_arguments() {
+        let args = parse(&["--playlist", "work"]).unwrap();
+        assert_eq!(args.playlist.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn playlist_can_be_given_with_an_equals_sign() {
+        let args = parse(&["--playlist=work"]).unwrap();
+        assert_eq!(args.playlist.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn playlist_names_with_spaces_are_accepted() {
+        let args = parse(&["--playlist=夜里的歌"]).unwrap();
+        assert_eq!(args.playlist.as_deref(), Some("夜里的歌"));
+        let args = parse(&["--playlist", "夜里的歌"]).unwrap();
+        assert_eq!(args.playlist.as_deref(), Some("夜里的歌"));
+    }
+
+    #[test]
+    fn a_missing_playlist_value_is_an_error() {
+        let err = parse(&["--playlist"]).unwrap_err().to_string();
+        assert!(err.contains("--playlist"), "{err}");
+        let err = parse(&["--playlist="]).unwrap_err().to_string();
+        assert!(err.contains("--playlist"), "{err}");
+    }
+
+    #[test]
+    fn config_can_be_given_in_both_forms() {
+        let a = parse(&["--config", "/tmp/a.json"]).unwrap();
+        let b = parse(&["--config=/tmp/a.json"]).unwrap();
+        assert_eq!(a.config, b.config);
+        assert_eq!(a.config, PathBuf::from("/tmp/a.json"));
+    }
+
+    #[test]
+    fn a_missing_config_value_is_an_error() {
+        assert!(parse(&["--config"]).is_err());
+        assert!(parse(&["--config="]).is_err());
+    }
+
+    #[test]
+    fn flags_can_be_combined() {
+        let args = parse(&["--no-audio", "--print-config", "--playlist", "x", "-h"]).unwrap();
+        assert!(args.no_audio);
+        assert!(args.print_config);
+        assert!(args.help);
+        assert_eq!(args.playlist.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn unknown_arguments_are_rejected() {
+        let err = parse(&["--nope"]).unwrap_err().to_string();
+        assert!(err.contains("未知参数"), "{err}");
+    }
+
+    #[test]
+    fn version_flag_is_recognised() {
+        assert!(parse(&["--version"]).unwrap().version);
+        assert!(parse(&["-V"]).unwrap().version);
+        assert!(!parse(&[]).unwrap().version);
+    }
+
+    #[test]
+    fn no_arguments_yields_the_defaults() {
+        let args = parse(&[]).unwrap();
+        assert!(!args.help);
+        assert!(!args.no_audio);
+        assert!(!args.print_config);
+        assert!(args.playlist.is_none());
+        assert_eq!(args.config, config::default_path());
+    }
 }

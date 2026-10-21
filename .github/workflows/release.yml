@@ -17,8 +17,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  verify-version:
+    name: 版本号必须与 tag 一致
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Cargo.toml version against the tag
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::Cargo.toml 的 version 是 $version，但 tag 是 $GITHUB_REF_NAME（应为 $tag）。发版前请先同步版本号。"
+            exit 1
+          fi
+          echo "版本号一致: $version"
+
   release:
     name: build and publish
+    needs: verify-version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
