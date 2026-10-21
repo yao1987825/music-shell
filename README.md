@@ -106,13 +106,14 @@ cargo build --release
 ```
 src/
   lib.rs        crate 出口，导出下面这些模块
-  config.rs     配置结构体、加载/写回前校验、主题配色
-  command.rs    Command 枚举 + 解析：输入字符串 → 结构化命令
+  main.rs       只负责启动和退出：解析参数、装配 App、跑 REPL
+  app.rs        状态流转：应用命令、推进播放状态机、REPL 循环
+  config.rs     只负责 JSON 读取、校验、写回
+  command.rs    只负责命令解析：输入字符串 → Command 枚举
+  renderer.rs   只负责终端渲染：整屏绘制 + 增量刷新
+  library.rs    只负责音乐库：扫描、播放列表、shuffle/next/prev
+  player.rs     只负责 rodio 播放状态：设备、解码、状态机、逻辑时钟
   capability.rs 格式能力判定：可播放 / 需转码 / 不支持
-  playlist.rs   Track / Playlist / Library：扫描、随机顺序、前进后退历史
-  player.rs     rodio 封装 + 逻辑时钟：打开设备、解码、播放/暂停、音量、时长探测
-  render.rs     终端渲染：整屏绘制 + 增量刷新（只重画进度条那一行）
-  main.rs       CLI 参数、REPL 主循环、App 状态机
 ```
 
 职责划分：
@@ -169,11 +170,19 @@ src/
 cargo run --release --example probe -- ~/Music/*
 ```
 
+## 终端适配
+
+- **宽度取 `config.window.width` 和真实终端宽度的较小值**，终端变窄时自动收窄、变宽时不会超出配置上限。终端尺寸变化会被实时感知（渲染循环每 200ms 查一次）。
+- **所有输出行都按显示宽度裁剪**，CJK 算两列，长路径、长标题、长状态文字都会截断并加省略号，不会折行破坏版面。
+- **`TERM=dumb` 或输出被重定向到文件时自动关闭 ANSI**，终端里看到的是纯文本，不会出现裸转义符。
+- 无音频设备时降级为静音模式，界面照常工作，状态栏会说明原因。
+
 ## 已知限制
 
 - **Opus 不支持。** rodio 0.22 完全没有 Opus 支持（它的 `lewton` 特性是 Vorbis 不是 Opus，symphonia 也不带 Opus codec）。要支持得引入 `symphonia-adapter-libopus`（依赖 C 库 libopus）。
 - **m4a/mp4 要求 `moov` 在文件前部。** ffmpeg 默认把 `moov` 写在文件末尾，symphonia 找不到。`ffmpeg -i in.m4a -c copy -movflags +faststart out.m4a` 转一下即可（`-c copy` 不重编码）。
 - **时长的探测靠完整解码。** `probe_duration` 把文件解码一遍数采样，长文件会卡一下。更大的音乐库应该建库时批量探测并缓存。
+- **格式判定基于扩展名。** 一个 `.mp3` 扩展名里装的是 AAC 流这种情况，扫描时发现不了，只在播放时报解码错误。
 - **没有音频标签。** 曲名取自文件名，艺术家取自父目录名，不读 ID3/Vorbis 标签。
 - **SSH 断开进程即终止。** 长期跑请用 tmux 或 systemd --user。
 - **纯终端界面。** 没有鼠标支持，没有 TUI 组件库依赖。
@@ -237,7 +246,7 @@ fn 例子() {
 ## 开发
 
 ```bash
-cargo test              # 84 个单元测试
+cargo test              # 94 个单元测试
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 ```

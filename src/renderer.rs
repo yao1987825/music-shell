@@ -1,5 +1,32 @@
 use crate::config::Theme;
 
+/// 是否输出 ANSI 转义序列。管道重定向、TERM=dumb 时关掉。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Style {
+    pub ansi: bool,
+}
+
+impl Style {
+    pub fn new(ansi: bool) -> Self {
+        Self { ansi }
+    }
+
+    /// 终端不支持 ANSI 时，TERM=dumb 或输出被重定向到文件
+    pub fn detect() -> Self {
+        use std::io::IsTerminal;
+        let dumb = std::env::var("TERM").is_ok_and(|t| t == "dumb");
+        Self::new(!dumb && std::io::stdout().is_terminal())
+    }
+
+    pub fn paint(&self, code: &str, text: &str) -> String {
+        if self.ansi {
+            format!("{code}{text}{RESET}")
+        } else {
+            text.to_string()
+        }
+    }
+}
+
 pub const RESET: &str = "\x1b[0m";
 pub const DIM: &str = "\x1b[38;5;240m";
 
@@ -26,6 +53,7 @@ const HELP: &[(&str, &str)] = &[
 pub struct View {
     pub app_name: String,
     pub theme: Theme,
+    pub style: Style,
     pub width: usize,
     pub height: usize,
     pub backend: &'static str,
@@ -60,15 +88,22 @@ impl Renderer {
             if progress == self.last_progress {
                 return String::new();
             }
-            let row = head.lines().count() + 1;
             self.last_progress = progress.clone();
+            if !view.style.ansi {
+                return format!("{progress}\n");
+            }
+            let row = head.lines().count() + 1;
             return format!("\x1b[s\x1b[{row};1H\x1b[2K{progress}\x1b[u");
         }
         self.drawn = true;
         self.last_head = head.clone();
         self.last_progress = progress.clone();
         self.last_tail = tail.clone();
-        format!("\x1b[2J\x1b[H{head}{progress}\n{tail}")
+        if view.style.ansi {
+            format!("\x1b[2J\x1b[H{head}{progress}\n{tail}")
+        } else {
+            format!("{head}{progress}\n{tail}")
+        }
     }
 
     pub fn reset(&mut self) {
@@ -101,33 +136,33 @@ pub fn help_text(theme: Theme) -> String {
 
 pub fn render_parts(view: &View) -> (String, String, String) {
     let theme = view.theme;
+    let st = view.style;
     let width = view.width;
     let mut head = String::new();
 
     head.push_str(&format!(
-        "{}{}{}{} {}{}\n",
-        theme.accent(),
-        view.app_name,
-        RESET,
-        DIM,
-        view.backend,
-        RESET
+        "{}{}{}\n",
+        st.paint(theme.accent(), &view.app_name),
+        "",
+        ""
     ));
-    head.push_str(&format!("{DIM}{}{RESET}\n", rule(width)));
-    head.push_str(&format!(
-        "{}{}{RESET} {DIM}— {}\n",
-        theme.strong(),
-        view.title,
-        view.artist
-    ));
+    head.push_str(&st.paint(DIM, &format!("{} {}", view.backend, "")));
+    head.push('\n');
+    head.push_str(&st.paint(DIM, &rule(width)));
+    head.push('\n');
+    let now_playing = format!("{} — {}", view.title, view.artist);
+    head.push_str(&st.paint(theme.strong(), &fit(&now_playing, width)));
+    head.push('\n');
 
     let progress = progress_line(view);
 
     let mut tail = String::new();
-    tail.push_str(&format!("{DIM}{}{RESET}\n", rule(width)));
+    tail.push_str(&st.paint(DIM, &rule(width)));
+    tail.push('\n');
 
     if view.empty_hint {
-        tail.push_str(&format!("{DIM}(音乐库为空，输入 l 重新扫描){RESET}\n"));
+        tail.push_str(&st.paint(DIM, "(音乐库为空，输入 l 重新扫描)"));
+        tail.push('\n');
     } else {
         for row in &view.rows {
             let (icon, color) = if row.active {
@@ -135,32 +170,33 @@ pub fn render_parts(view: &View) -> (String, String, String) {
             } else {
                 (" ", DIM)
             };
-            let line = format!("{icon}{:>4}  {}", row.index, row.title);
-            let fill = width.saturating_sub(display_width(&line) + 25);
-            tail.push_str(&format!(
-                "{color}{line}{}{RESET}{DIM}{}{RESET}\n",
-                " ".repeat(fill),
-                truncate(&row.artist, 24)
-            ));
+            let artist = truncate(&row.artist, 24);
+            let budget = width.saturating_sub(display_width(&artist) + 2);
+            let line = fit(&format!("{icon}{:>4}  {}", row.index, row.title), budget);
+            let fill = width.saturating_sub(display_width(&line) + display_width(&artist) + 1);
+            tail.push_str(&st.paint(color, &line));
+            tail.push_str(&" ".repeat(fill));
+            tail.push_str(&st.paint(DIM, &artist));
+            tail.push('\n');
         }
-        tail.push_str(&format!("{DIM}{}{RESET}\n", view.range));
+        tail.push_str(&st.paint(DIM, &view.range));
+        tail.push('\n');
     }
 
-    tail.push_str(&format!("{DIM}{}{RESET}\n", rule(width)));
-    tail.push_str(&format!(
-        "{}状态 {}{RESET}  {DIM}随机 {}{RESET}  {DIM}循环 {}{RESET}\n",
-        theme.strong(),
+    tail.push_str(&st.paint(DIM, &rule(width)));
+    tail.push('\n');
+    let state_line = format!(
+        "状态 {}  随机 {}  循环 {}",
         view.state,
         onoff(view.shuffle),
-        view.repeat,
-    ));
-    tail.push_str(&format!(
-        "{DIM}{}{RESET}{}»{RESET} {}\n",
-        view.source,
-        theme.accent(),
-        view.status
-    ));
-    tail.push_str(&format!("{DIM}输入命令 (? 看帮助, q 退出) ›{RESET} "));
+        view.repeat
+    );
+    tail.push_str(&st.paint(theme.strong(), &fit(&state_line, width)));
+    tail.push('\n');
+    let status_line = format!("{} » {}", view.source, view.status);
+    tail.push_str(&st.paint(DIM, &fit(&status_line, width)));
+    tail.push('\n');
+    tail.push_str(&st.paint(DIM, "输入命令 (? 看帮助, q 退出) › "));
     (head, progress, tail)
 }
 
@@ -169,19 +205,19 @@ pub fn render(view: &View) -> String {
     format!("{head}{progress}\n{tail}")
 }
 
-/// 进度条单独一行，供播放中原地刷新用
 pub fn progress_line(view: &View) -> String {
     let bar_width = view.width.saturating_sub(28).clamp(10, 60);
     let filled = (view.ratio * bar_width as f32).round() as usize;
+    let bar = format!(
+        "{}{}",
+        view.style.paint(view.theme.bar(), &"█".repeat(filled)),
+        view.style
+            .paint(DIM, &"░".repeat(bar_width.saturating_sub(filled)))
+    );
     format!(
-        "   {}{}{}{}{} {} / {}{RESET}",
-        view.theme.bar(),
-        "█".repeat(filled),
-        RESET,
-        DIM,
-        "░".repeat(bar_width.saturating_sub(filled)),
+        "   {bar} {} / {}",
         fmt_time(view.position_secs),
-        fmt_time(view.duration_secs),
+        fmt_time(view.duration_secs)
     )
 }
 
@@ -218,6 +254,14 @@ pub fn pad(text: &str, width: usize) -> String {
     let text = truncate(text, width);
     let fill = width.saturating_sub(display_width(&text));
     format!("{text}{}", " ".repeat(fill))
+}
+
+/// 按显示宽度裁剪，末尾补 "…"（留给调用方已有的颜色转义不算在内）
+pub fn fit(text: &str, width: usize) -> String {
+    if display_width(text) <= width {
+        return text.to_string();
+    }
+    truncate(text, width)
 }
 
 pub fn truncate(text: &str, max: usize) -> String {
@@ -275,6 +319,7 @@ mod tests {
         let view = View {
             app_name: "x".into(),
             theme: Theme::Dark,
+            style: Style::new(true),
             width: 60,
             height: 24,
             backend: "静音模式",
@@ -297,5 +342,110 @@ mod tests {
         assert!(line.contains('█'));
         assert!(line.contains('░'));
         assert!(line.contains("0:30 / 1:00"));
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn view_with(width: usize, ansi: bool) -> View {
+        View {
+            app_name: "music-shell".into(),
+            theme: Theme::Dark,
+            style: Style::new(ansi),
+            width,
+            height: 24,
+            backend: "静音模式",
+            title: "一首很长的曲子名字".into(),
+            artist: "某个很长的艺术家名字".into(),
+            state: "playing",
+            position_secs: 61,
+            duration_secs: 454,
+            ratio: 0.13,
+            volume: 70,
+            shuffle: true,
+            repeat: "one",
+            source: "/很长的音乐库路径/with/a/very/long/path/子目录".into(),
+            status: "已扫描 12345 首曲目".into(),
+            rows: vec![Row {
+                index: 1,
+                title: "曲目标题".into(),
+                artist: "艺术家".into(),
+                active: true,
+            }],
+            range: "第 1-1 / 1 首".into(),
+            empty_hint: false,
+        }
+    }
+
+    #[test]
+    fn no_line_exceeds_the_configured_width() {
+        let view = view_with(40, true);
+        let frame = render(&view);
+        for line in frame.lines() {
+            let visible = strip_ansi(line);
+            assert!(
+                display_width(&visible) <= 40,
+                "超宽了 ({}): {visible}",
+                display_width(&visible)
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_terminal_truncates_long_content_instead_of_wrapping() {
+        let view = view_with(30, true);
+        let frame = render(&view);
+        for line in frame.lines() {
+            let visible = strip_ansi(line);
+            assert!(display_width(&visible) <= 30, "超宽了: {visible}");
+        }
+        assert!(frame.contains('…'), "长内容应该被截断并加省略号");
+    }
+
+    #[test]
+    fn ansi_disabled_output_contains_no_escape_sequences() {
+        let view = view_with(80, false);
+        let frame = render(&view);
+        assert!(!frame.contains('\x1b'), "关闭 ANSI 后不应有转义序列");
+    }
+
+    #[test]
+    fn ansi_enabled_output_does_contain_escape_sequences() {
+        let view = view_with(80, true);
+        let frame = render(&view);
+        assert!(frame.contains('\x1b'));
+    }
+
+    #[test]
+    fn style_detects_a_pipe_as_non_ansi() {
+        let style = Style::new(false);
+        assert_eq!(style.paint("\x1b[31m", "x"), "x");
+        let style = Style::new(true);
+        assert_eq!(style.paint("\x1b[31m", "x"), "\x1b[31mx\x1b[0m");
+    }
+
+    #[test]
+    fn fit_respects_display_width() {
+        assert_eq!(display_width(&fit("稻香很好听", 5)), 5);
+        assert_eq!(fit("短", 10), "短");
+    }
+
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 }

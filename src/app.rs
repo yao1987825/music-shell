@@ -11,7 +11,7 @@ use crate::command::Command;
 use crate::config::{Config, Repeat};
 use crate::library::{self, Library, Playlist, Track};
 use crate::player::{Player, State};
-use crate::renderer::{self, Renderer, View};
+use crate::renderer::{self, Renderer, Style, View};
 
 pub const TICK: Duration = Duration::from_millis(200);
 
@@ -23,6 +23,7 @@ pub struct App {
     source: String,
     status: String,
     renderer: Renderer,
+    style: Style,
 }
 
 impl App {
@@ -35,6 +36,7 @@ impl App {
             source: String::new(),
             status: String::new(),
             renderer: Renderer::default(),
+            style: Style::detect(),
         };
         app.lib.set_shuffle(app.cfg.shuffle);
         app.relabel();
@@ -249,8 +251,42 @@ impl App {
     pub fn save_config(&mut self) {
         self.cfg.set_volume_f32(self.player.volume());
         self.cfg.shuffle = self.lib.shuffle;
+        let before = self.cfg.clone();
         match self.cfg.save(&self.config_path) {
-            Ok(()) => self.status = format!("配置已写入 {}", self.config_path.display()),
+            Ok(()) => {
+                let after = self.cfg.normalized();
+                let mut notes = Vec::new();
+                if before.volume != after.volume {
+                    notes.push(format!("音量 {}→{}", before.volume, after.volume));
+                }
+                if before.window.width != after.window.width {
+                    notes.push(format!(
+                        "宽度 {}→{}",
+                        before.window.width, after.window.width
+                    ));
+                }
+                if before.window.height != after.window.height {
+                    notes.push(format!(
+                        "高度 {}→{}",
+                        before.window.height, after.window.height
+                    ));
+                }
+                if before.app_name != after.app_name {
+                    notes.push(format!(
+                        "名称 \"{}\"→\"{}\"",
+                        before.app_name, after.app_name
+                    ));
+                }
+                self.status = if notes.is_empty() {
+                    format!("配置已写入 {}", self.config_path.display())
+                } else {
+                    format!(
+                        "配置已写入 {}（已修正：{}）",
+                        self.config_path.display(),
+                        notes.join("、")
+                    )
+                };
+            }
             Err(err) => self.status = format!("写配置失败: {err}"),
         }
     }
@@ -330,6 +366,23 @@ impl App {
         self.cfg.auto_play
     }
 
+    /// 渲染宽度取 config 与真实终端宽度的较小值，避免在窄终端里折行
+    pub fn effective_width(&self) -> usize {
+        let configured = self.cfg.window.width;
+        match terminal_size::terminal_size() {
+            Some((w, _)) => configured.min(usize::from(w.0)).max(20),
+            None => configured,
+        }
+    }
+
+    pub fn effective_height(&self) -> usize {
+        let configured = self.cfg.window.height;
+        match terminal_size::terminal_size() {
+            Some((_, h)) => configured.min(usize::from(h.0)).max(10),
+            None => configured,
+        }
+    }
+
     pub fn view(&self) -> View {
         let (title, artist) = match self.lib.current() {
             Some(t) => (t.title.clone(), t.artist.clone()),
@@ -358,8 +411,9 @@ impl App {
         View {
             app_name: self.cfg.app_name.clone(),
             theme: self.cfg.theme,
-            width: self.cfg.window.width,
-            height: self.cfg.window.height,
+            style: self.style,
+            width: self.effective_width(),
+            height: self.effective_height(),
             backend: if self.player.silent {
                 "静音模式"
             } else {

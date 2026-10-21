@@ -152,7 +152,9 @@ impl Config {
             .with_context(|| format!("读取配置失败: {}", path.display()))?;
         let cfg: Self = serde_json::from_str(&text)
             .with_context(|| format!("解析配置失败: {}", path.display()))?;
-        Ok(cfg.normalized())
+        let cfg = cfg.normalized();
+        cfg.check_shape()?;
+        Ok(cfg)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -171,17 +173,21 @@ impl Config {
         self.validated().map(|_| ())
     }
 
-    pub fn validated(&self) -> Result<Self> {
-        let cfg = self.normalized();
-        if cfg.volume > 100 {
-            anyhow::bail!("volume 必须在 0-100 之间，当前是 {}", cfg.volume);
-        }
-        if cfg.library_path.as_os_str().is_empty() {
+    /// 只校验配置本身的形状，不碰文件系统。加载和写回都该过这一关。
+    pub fn check_shape(&self) -> Result<()> {
+        if self.library_path.as_os_str().is_empty() {
             anyhow::bail!("library_path 不能为空");
         }
-        if cfg.playlists_dir.as_os_str().is_empty() {
+        if self.playlists_dir.as_os_str().is_empty() {
             anyhow::bail!("playlists_dir 不能为空");
         }
+        Ok(())
+    }
+
+    /// 写回前的完整校验：形状 + 文件系统状态。返回规范化后的副本。
+    pub fn validated(&self) -> Result<Self> {
+        let cfg = self.normalized();
+        cfg.check_shape()?;
         if !cfg.library_path.exists() {
             std::fs::create_dir_all(&cfg.library_path).with_context(|| {
                 format!(
@@ -388,5 +394,65 @@ mod validation_tests {
         unsafe { std::env::remove_var(CONFIG_ENV) };
         assert!(default_path().ends_with("config.json"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_library_path_is_rejected_on_load() {
+        let dir = std::env::temp_dir().join("music_shell_shape");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let cfg = Config {
+            library_path: PathBuf::new(),
+            playlists_dir: dir.join("pls"),
+            ..Config::default()
+        };
+        let text = serde_json::to_string(&cfg).unwrap();
+        std::fs::write(&path, text).unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(err.contains("library_path"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_playlists_dir_is_rejected_on_load() {
+        let cfg = Config {
+            library_path: PathBuf::from("/tmp"),
+            playlists_dir: PathBuf::new(),
+            ..Config::default()
+        };
+        let err = cfg.check_shape().unwrap_err().to_string();
+        assert!(err.contains("playlists_dir"), "{err}");
+    }
+
+    #[test]
+    fn a_valid_config_passes_the_shape_check() {
+        let cfg = Config {
+            library_path: PathBuf::from("/tmp"),
+            playlists_dir: PathBuf::from("/tmp"),
+            ..Config::default()
+        };
+        cfg.check_shape().unwrap();
+    }
+
+    #[test]
+    fn out_of_range_values_are_clamped_not_rejected() {
+        let cfg = Config {
+            volume: 250,
+            window: Window {
+                width: 0,
+                height: 999_999,
+            },
+            ..Config::default()
+        }
+        .normalized();
+        assert_eq!(cfg.volume, 100);
+        assert_eq!(cfg.window.width, 40);
+        assert_eq!(cfg.window.height, 100);
     }
 }
