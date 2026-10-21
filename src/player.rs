@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -10,6 +10,7 @@ use crate::library::Track;
 
 pub const SILENCE_EPSILON: Duration = Duration::from_millis(250);
 pub const DRIFT_TOLERANCE: Duration = Duration::from_millis(400);
+pub const DURATION_CACHE_LIMIT: usize = 4096;
 
 #[derive(Debug, Default)]
 struct Clock {
@@ -41,9 +42,12 @@ impl Clock {
         self.started = None;
     }
 
+    /// 把时钟基准挪到指定位置，但保持继续走。
+    /// 早先的实现把 started 置 None，等于把时钟彻底停住，
+    /// 之后位置就不再前进，也不会再触发 finished()。
     fn force(&mut self, value: Duration) {
         self.accumulated = value;
-        self.started = None;
+        self.started = Some(Instant::now());
     }
 }
 
@@ -88,6 +92,7 @@ pub struct Player {
     volume: f32,
     duration: Duration,
     clock: Clock,
+    durations: std::collections::HashMap<PathBuf, Option<Duration>>,
 }
 
 impl Player {
@@ -100,6 +105,7 @@ impl Player {
             volume: volume.clamp(0.0, 1.0),
             duration: Duration::ZERO,
             clock: Clock::default(),
+            durations: std::collections::HashMap::new(),
         };
         if force_silent {
             return this;
@@ -120,6 +126,19 @@ impl Player {
             }
         }
         this
+    }
+
+    /// 探测时长并缓存。循环播放同一首时不会重复解码整个文件。
+    fn known_duration(&mut self, track: &Track) -> Option<Duration> {
+        if let Some(cached) = self.durations.get(&track.path) {
+            return *cached;
+        }
+        let probed = probe_duration(&track.path);
+        if self.durations.len() >= DURATION_CACHE_LIMIT {
+            self.durations.clear();
+        }
+        self.durations.insert(track.path.clone(), probed);
+        probed
     }
 
     pub fn state(&self) -> State {
@@ -148,7 +167,7 @@ impl Player {
     pub fn play(&mut self, track: &Track) -> Result<()> {
         let file = File::open(&track.path)
             .with_context(|| format!("打开音频文件失败: {}", track.path.display()))?;
-        let duration = probe_duration(&track.path).unwrap_or_default();
+        let duration = self.known_duration(track).unwrap_or_default();
         if let Some(player) = &self.rodio {
             let source = Decoder::new(BufReader::new(file))
                 .with_context(|| format!("解码失败: {}", track.path.display()))?;
@@ -279,7 +298,7 @@ mod tests {
         out
     }
 
-    fn write_wav(name: &str, seconds: u32) -> std::path::PathBuf {
+    pub(super) fn write_wav(name: &str, seconds: u32) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join("music_shell_test_player");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{name}.wav"));
@@ -573,5 +592,57 @@ mod state_machine_tests {
         assert!(!State::Paused.is_playing());
         assert!(State::Paused.is_active());
         assert!(!State::Stopped.is_active());
+    }
+}
+
+#[cfg(test)]
+mod duration_cache_tests {
+    use super::*;
+    use crate::player::tests::write_wav;
+
+    #[test]
+    fn the_duration_is_probed_only_once_per_file() {
+        let path = write_wav("cache", 2);
+        let mut p = Player::new(1.0, true);
+
+        p.play(&Track::from_path(path.clone())).unwrap();
+        let first = p.duration();
+        assert_eq!(first.as_secs(), 2);
+
+        std::fs::write(&path, b"RIFF").unwrap();
+        p.play(&Track::from_path(path.clone())).unwrap();
+        assert_eq!(p.duration(), first, "第二次播放同一首应该用缓存里的时长");
+    }
+
+    #[test]
+    fn different_files_get_their_own_duration() {
+        let a = write_wav("dur_a", 2);
+        let b = write_wav("dur_b", 5);
+        let mut p = Player::new(1.0, true);
+
+        p.play(&Track::from_path(a.clone())).unwrap();
+        assert_eq!(p.duration().as_secs(), 2);
+        p.play(&Track::from_path(b.clone())).unwrap();
+        assert_eq!(p.duration().as_secs(), 5);
+        p.play(&Track::from_path(a)).unwrap();
+        assert_eq!(p.duration().as_secs(), 2);
+    }
+
+    #[test]
+    fn the_clock_keeps_running_after_a_drift_correction() {
+        let path = write_wav("rebase", 5);
+        let mut p = Player::new(1.0, true);
+        p.play(&Track::from_path(path)).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let before = p.position();
+
+        p.clock.force(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(150));
+        let after = p.position();
+
+        assert!(
+            after > before,
+            "漂移校正之后时钟必须继续走，之前是 {before:?} 现在是 {after:?}"
+        );
     }
 }

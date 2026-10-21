@@ -124,7 +124,11 @@ impl App {
 
     pub fn on_track_end(&mut self) -> bool {
         if self.cfg.repeat == Repeat::One {
+            let title = self.lib.current().map(|t| t.title.clone());
             self.play_cursor();
+            if let Some(title) = title {
+                self.status = format!("单曲循环：{title}");
+            }
             return true;
         }
         let at_end = self

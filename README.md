@@ -68,7 +68,7 @@ cargo build --release
 | `pl` / `pl <名字>` | 列出 / 加载播放列表 |
 | `sv <名字>` | 把当前列表存成播放列表 |
 | `s` | 随机播放开关 |
-| `r` | 循环模式 off → one → all |
+| `r` | 循环模式 off → one（单曲循环）→ all（列表循环） |
 | `c` | 重新载入 `config.json` |
 | `w` | 把当前音量 / 状态写回 `config.json` |
 | `?` | 帮助 |
