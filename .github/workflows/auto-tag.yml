@@ -1,0 +1,48 @@
+name: Auto Tag
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: 按 Cargo.toml 的版本号自动打 tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 读取 Cargo.toml 里的版本号
+        id: ver
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ -z "$version" ]; then
+            echo "::error::Cargo.toml 里读不到 version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml 版本: $version"
+
+      - name: 这个版本已经有 tag 了吗
+        id: check
+        run: |
+          if git rev-parse "refs/tags/v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "tag v${{ steps.ver.outputs.version }} 已存在，跳过"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 创建并推送 tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.ver.outputs.version }}" -m "release v${{ steps.ver.outputs.version }}"
+          git push origin "v${{ steps.ver.outputs.version }}"
+          echo "已创建并推送 tag v${{ steps.ver.outputs.version }}，会触发发布流程"

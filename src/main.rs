@@ -108,7 +108,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
     if args.version {
-        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("MS_VERSION"));
         return Ok(());
     }
 

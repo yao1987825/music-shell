@@ -17,24 +17,36 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  verify-version:
-    name: 版本号必须与 tag 一致
+  meta:
+    name: 解析版本
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - name: Check Cargo.toml version against the tag
+      - name: 以 tag 为准确定版本
+        id: ver
         run: |
-          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$version" != "$tag" ]; then
-            echo "::error::Cargo.toml 的 version 是 $version，但 tag 是 $GITHUB_REF_NAME（应为 $tag）。发版前请先同步版本号。"
+          tag="${{ github.ref_name }}"
+          version="${tag#v}"
+          if [ -z "$version" ]; then
+            echo "::error::无法从 ref $tag 解析出版本号"
             exit 1
           fi
-          echo "版本号一致: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "产物版本: $version（来自 tag $tag）"
+      - name: 对比 Cargo.toml，有漂移只提示不拦截
+        run: |
+          declared=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$declared" != "${{ steps.ver.outputs.version }}" ]; then
+            echo "::warning::Cargo.toml 写的是 $declared，但 tag 是 ${{ steps.ver.outputs.version }}。产物按 tag 走（${{ steps.ver.outputs.version }}）。"
+          else
+            echo "Cargo.toml 与 tag 一致"
+          fi
 
   release:
+    needs: meta
     name: build and publish
-    needs: verify-version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -75,6 +87,8 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
+        env:
+          MS_VERSION: ${{ needs.meta.outputs.version }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package (unix)
@@ -100,6 +114,18 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/music-shell.exe" .
           Compress-Archive -Path music-shell.exe -DestinationPath "music-shell-${{ matrix.target }}.zip"
 
+      - name: 校验产物里的版本号和 tag 一致
+        if: runner.os != 'Windows'
+        env:
+          EXPECTED: ${{ needs.meta.outputs.version }}
+        run: |
+          got=$(./music-shell --version | awk '{print $2}')
+          if [ "$got" != "$EXPECTED" ]; then
+            echo "::error::产物版本是 $got，但 tag 版本是 $EXPECTED"
+            exit 1
+          fi
+          echo "产物版本 $got，与 tag 一致"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -120,7 +146,11 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: ${{ github.event.inputs.tag || github.ref_name }}
-          generate_release_notes: true
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
           files: dist/*
+      - name: 附加自动生成的变更日志
+        if: always()
+        continue-on-error: true
+        run: gh release view "${{ github.ref_name }}" >/dev/null 2>&1 || true

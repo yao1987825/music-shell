@@ -292,8 +292,28 @@ EOF
 
 ## CI 与发布
 
-- `.github/workflows/ci.yml` —— push / PR 触发：格式检查、clippy（`-D warnings`）、测试，以及 Linux / macOS / Windows 三平台构建 + `--help` 冒烟。
-- `.github/workflows/release.yml` —— 推 `v*` tag 触发：构建 5 个目标并挂到 Release。
+三个 workflow 串成一条全自动的发布链，**不需要手工打 tag 或改版本号**：
+
+```
+bump.yml  ──手动触发，选 patch/minor/major──▶ 改 Cargo.toml → 提交推送
+    │
+    ▼
+auto-tag.yml ──push 到 main──▶ 读 Cargo.toml 版本 → 自动打 v<版本> tag
+    │
+    ▼
+release.yml ──tag 推送触发──▶ 构建 5 个目标 → 校验产物版本 → 挂到 Release
+```
+
+- `bump.yml` —— 手动触发，填 `patch` / `minor` / `major`，自动改 `Cargo.toml` 里的版本号并提交推送。填 `dry-run` 可以只看结果不提交。
+- `auto-tag.yml` —— 每次 push 到 main 都跑，读 `Cargo.toml` 的版本号，**没有对应 tag 就自动创建并推送**（已有则跳过）。tag 推送会触发发布流程。
+- `release.yml` —— tag 推送触发，构建 5 个目标并挂到 Release。
+- `ci.yml` —— push / PR 触发：格式检查、clippy（`-D warnings`）、测试，以及 Linux / macOS / Windows 三平台构建 + `--help` 冒烟。
+
+**版本号以谁为准**
+
+发布产物的版本号**永远等于 tag**。CI 构建时通过 `MS_VERSION` 环境变量注入，`build.rs` 把它编译进二进制（`--version` 读的就是它）。如果 `Cargo.toml` 和 tag 对不上，CI 只会给个 warning 提示，产物仍按 tag 走——不会出现"装完发现版本号不对"。
+
+本地构建时 `MS_VERSION` 没设，`build.rs` 退回用 `Cargo.toml` 里的版本号，所以本地 `cargo build` 的 `--version` 和 `Cargo.toml` 一致。
 
   | 目标 | 产物 |
   | --- | --- |
