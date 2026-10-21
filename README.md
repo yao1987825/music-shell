@@ -246,7 +246,7 @@ fn 例子() {
 ## 开发
 
 ```bash
-cargo test              # 94 个单元测试
+cargo test              # 97 个单元测试
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 ```

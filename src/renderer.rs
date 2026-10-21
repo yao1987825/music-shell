@@ -193,9 +193,14 @@ pub fn render_parts(view: &View) -> (String, String, String) {
     );
     tail.push_str(&st.paint(theme.strong(), &fit(&state_line, width)));
     tail.push('\n');
-    let status_line = format!("{} » {}", view.source, view.status);
-    tail.push_str(&st.paint(DIM, &fit(&status_line, width)));
+    let mut status_lines = view.status.split('\n');
+    let first = status_lines.next().unwrap_or_default();
+    tail.push_str(&st.paint(DIM, &fit(&format!("{} » {}", view.source, first), width)));
     tail.push('\n');
+    for extra in status_lines {
+        tail.push_str(&st.paint(DIM, &fit(extra, width)));
+        tail.push('\n');
+    }
     tail.push_str(&st.paint(DIM, "输入命令 (? 看帮助, q 退出) › "));
     (head, progress, tail)
 }
@@ -430,6 +435,80 @@ mod layout_tests {
     fn fit_respects_display_width() {
         assert_eq!(display_width(&fit("稻香很好听", 5)), 5);
         assert_eq!(fit("短", 10), "短");
+    }
+
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    fn base_view(status: String) -> View {
+        View {
+            app_name: "x".into(),
+            theme: Theme::Dark,
+            style: Style::new(true),
+            width: 60,
+            height: 24,
+            backend: "静音模式",
+            title: "t".into(),
+            artist: "a".into(),
+            state: "playing",
+            position_secs: 0,
+            duration_secs: 0,
+            ratio: 0.0,
+            volume: 70,
+            shuffle: false,
+            repeat: "off",
+            source: "src".into(),
+            status,
+            rows: Vec::new(),
+            range: String::new(),
+            empty_hint: true,
+        }
+    }
+
+    #[test]
+    fn a_multi_line_status_keeps_all_its_lines() {
+        let view = base_view("第一行\n第二行\n第三行".into());
+        let frame = render(&view);
+        for line in ["第一行", "第二行", "第三行"] {
+            assert!(frame.contains(line), "多行状态丢了 {line}:\n{frame}");
+        }
+    }
+
+    #[test]
+    fn a_multi_line_status_keeps_every_line_within_the_width() {
+        let long = "很长的帮助文字".repeat(12);
+        let view = base_view(long);
+        let frame = render(&view);
+        for line in frame.lines() {
+            let visible = strip_ansi(line);
+            assert!(display_width(&visible) <= 60, "超宽: {visible}");
+        }
+    }
+
+    #[test]
+    fn a_single_line_status_still_renders_inline() {
+        let view = base_view("正在播放某首歌".into());
+        let frame = render(&view);
+        assert!(frame.contains("src » 正在播放某首歌"), "{frame}");
     }
 
     fn strip_ansi(text: &str) -> String {
