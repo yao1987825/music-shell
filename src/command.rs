@@ -6,6 +6,10 @@ pub enum Command {
     Prev,
     CursorDown,
     CursorUp,
+    CursorHome,
+    CursorEnd,
+    PageUp,
+    PageDown,
     VolumeUp,
     VolumeDown,
     PlayIndex(usize),
@@ -43,6 +47,8 @@ impl Command {
             "b" | "prev" => Self::Prev,
             "j" | "down" => Self::CursorDown,
             "k" | "up" => Self::CursorUp,
+            "g" | "home" => Self::CursorHome,
+            "e" | "end" => Self::CursorEnd,
             "+" | "=" | "vol+" => Self::VolumeUp,
             "-" | "_" | "vol-" => Self::VolumeDown,
             "l" | "load" | "rescan" => Self::Rescan,
@@ -81,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn every_documented_alias_maps_to_its_command() {
+    fn navigation_shortcuts_exist() {
         assert_eq!(Command::parse("q"), Command::Quit);
         assert_eq!(Command::parse("quit"), Command::Quit);
         assert_eq!(Command::parse("p"), Command::TogglePlay);
@@ -89,6 +95,8 @@ mod tests {
         assert_eq!(Command::parse("b"), Command::Prev);
         assert_eq!(Command::parse("j"), Command::CursorDown);
         assert_eq!(Command::parse("k"), Command::CursorUp);
+        assert_eq!(Command::parse("g"), Command::CursorHome);
+        assert_eq!(Command::parse("e"), Command::CursorEnd);
         assert_eq!(Command::parse("+"), Command::VolumeUp);
         assert_eq!(Command::parse("-"), Command::VolumeDown);
         assert_eq!(Command::parse("l"), Command::Rescan);

@@ -1,7 +1,6 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::thread;
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -9,11 +8,16 @@ use anyhow::Result;
 use crate::capability::Capability;
 use crate::command::Command;
 use crate::config::{Config, Repeat};
+use crate::input::{self, Input};
 use crate::library::{self, Library, Playlist, Track};
 use crate::player::{Player, State};
 use crate::renderer::{self, Renderer, Style, View};
 
 pub const TICK: Duration = Duration::from_millis(200);
+const PAGE: isize = 10;
+
+/// 渲染结果里第一行曲目所在的行号：标题1 分隔2 曲名3 进度4 分隔5
+const TRACK_ROW_OFFSET: usize = 6;
 
 pub struct App {
     cfg: Config,
@@ -24,6 +28,8 @@ pub struct App {
     status: String,
     renderer: Renderer,
     style: Style,
+    /// 硬件光标停在哪一行；None 表示回到输入行
+    focus_row: Option<usize>,
 }
 
 impl App {
@@ -37,6 +43,7 @@ impl App {
             status: String::new(),
             renderer: Renderer::default(),
             style: Style::detect(),
+            focus_row: None,
         };
         app.lib.set_shuffle(app.cfg.shuffle);
         app.relabel();
@@ -301,6 +308,7 @@ impl App {
         }
     }
 
+    /// 执行命令。返回 true 表示这是导航动作，光标应停在选中行上。
     pub fn dispatch(&mut self, command: Command) -> bool {
         match command {
             Command::Quit => return false,
@@ -315,8 +323,34 @@ impl App {
                     self.play_cursor();
                 }
             }
-            Command::CursorDown => self.lib.move_cursor(1),
-            Command::CursorUp => self.lib.move_cursor(-1),
+            Command::CursorDown => {
+                self.lib.move_cursor(1);
+                return true;
+            }
+            Command::CursorUp => {
+                self.lib.move_cursor(-1);
+                return true;
+            }
+            Command::CursorHome => {
+                if !self.lib.is_empty() {
+                    self.lib.select(0);
+                    return true;
+                }
+            }
+            Command::CursorEnd => {
+                if !self.lib.is_empty() {
+                    self.lib.select(self.lib.len() - 1);
+                    return true;
+                }
+            }
+            Command::PageUp => {
+                self.lib.move_cursor(-PAGE);
+                return true;
+            }
+            Command::PageDown => {
+                self.lib.move_cursor(PAGE);
+                return true;
+            }
             Command::VolumeUp => self.adjust_volume(5),
             Command::VolumeDown => self.adjust_volume(-5),
             Command::PlayIndex(index) => {
@@ -345,31 +379,68 @@ impl App {
                 self.status = format!("未知命令 `{word}`，输入 ? 看帮助");
             }
         }
-        true
+        false
     }
 
     pub fn repl(&mut self) -> Result<()> {
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || feed_stdin(tx));
+        input::enable_raw_input();
+        let rx = input::spawn_reader();
         loop {
             self.player.tick();
             if self.player.finished() && !self.on_track_end() {
                 break;
             }
             self.refresh();
+
             match rx.recv_timeout(TICK) {
-                Ok(Some(line)) => {
-                    let command = Command::parse(line.trim());
-                    if !self.dispatch(command) {
+                Ok(Input::Eof) => break,
+                Ok(item) => {
+                    let Some(command) = item.to_command() else {
+                        continue;
+                    };
+                    if command == Command::Quit {
                         break;
                     }
+                    let was_navigation = self.dispatch(command);
+                    if was_navigation {
+                        self.focus_row = self.selected_row();
+                    } else {
+                        self.focus_row = None;
+                    }
                 }
-                Ok(None) | Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
         }
         self.player.stop();
+        input::restore_terminal();
         Ok(())
+    }
+
+    fn list_rows(&self) -> usize {
+        self.cfg.window.height.saturating_sub(11).clamp(3, 20)
+    }
+
+    fn list_start(&self, rows: usize, cursor: usize) -> usize {
+        let len = self.lib.len();
+        cursor
+            .saturating_sub(rows / 2)
+            .min(len.saturating_sub(rows))
+    }
+
+    /// 选中曲目在渲染结果里的行号（1 基），供硬件光标定位
+    fn selected_row(&self) -> Option<usize> {
+        if self.lib.is_empty() {
+            return None;
+        }
+        let rows = self.list_rows();
+        let cursor = self.lib.position()?;
+        let start = self.list_start(rows, cursor);
+        let offset = cursor.checked_sub(start)?;
+        if offset >= rows {
+            return None;
+        }
+        Some(TRACK_ROW_OFFSET + offset)
     }
 
     pub fn auto_play(&self) -> bool {
@@ -449,10 +520,16 @@ impl App {
     pub fn refresh(&mut self) {
         let view = self.view();
         let frame = self.renderer.draw(&view);
-        if !frame.is_empty() {
-            print!("{frame}");
-            io::stdout().flush().ok();
+        if frame.is_empty() {
+            return;
         }
+        // 刚做完导航就把硬件光标挪到选中那一行，
+        // 下次敲命令时再回到输入行
+        match self.focus_row {
+            Some(row) => print!("{frame}\x1b[{row};1H"),
+            None => print!("{frame}"),
+        }
+        io::stdout().flush().ok();
     }
 }
 
@@ -460,24 +537,5 @@ fn describe_failure(track: &Track, err: &anyhow::Error) -> String {
     match Capability::of(&track.path).hint(&track.path) {
         Some(hint) => hint,
         None => format!("{}（{err}）", track.title),
-    }
-}
-
-fn feed_stdin(tx: Sender<Option<String>>) {
-    let stdin = io::stdin();
-    let mut locked = stdin.lock();
-    loop {
-        let mut buf = String::new();
-        match locked.read_line(&mut buf) {
-            Ok(0) | Err(_) => {
-                let _ = tx.send(None);
-                return;
-            }
-            Ok(_) => {
-                if tx.send(Some(buf)).is_err() {
-                    return;
-                }
-            }
-        }
     }
 }

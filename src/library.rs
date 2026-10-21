@@ -290,13 +290,19 @@ impl Library {
         self.order.get(pos).map(|i| &self.tracks[*i])
     }
 
+    /// 光标上下移动，默认在两端停住不环绕——上下键是用来"翻列表"的，
+    /// 撞到顶或底还突然跳到另一头很难用。
     pub fn move_cursor(&mut self, delta: isize) {
         if self.order.is_empty() {
             return;
         }
-        let len = self.order.len() as isize;
-        let cur = self.cursor.unwrap_or(0) as isize;
-        let next = (cur + delta).rem_euclid(len) as usize;
+        let len = self.order.len();
+        let cur = self.cursor.unwrap_or(0);
+        let next = if delta >= 0 {
+            cur.saturating_add(delta as usize).min(len - 1)
+        } else {
+            cur.saturating_sub(delta.unsigned_abs())
+        };
         self.cursor = Some(next);
     }
 
@@ -434,11 +440,25 @@ mod tests {
     }
 
     #[test]
-    fn cursor_wraps_in_both_directions() {
+    fn cursor_stops_at_both_ends() {
         let mut lib = library(&["a", "b", "c"]);
         lib.move_cursor(-1);
-        assert_eq!(lib.position(), Some(2));
+        assert_eq!(lib.position(), Some(0), "顶部继续往上应停住");
         lib.move_cursor(1);
+        assert_eq!(lib.position(), Some(1));
+        lib.move_cursor(1);
+        lib.move_cursor(1);
+        assert_eq!(lib.position(), Some(2), "底部继续往下应停住");
+        lib.move_cursor(1);
+        assert_eq!(lib.position(), Some(2));
+    }
+
+    #[test]
+    fn a_big_jump_is_clamped_to_the_end() {
+        let mut lib = library(&["a", "b", "c", "d"]);
+        lib.move_cursor(99);
+        assert_eq!(lib.position(), Some(3));
+        lib.move_cursor(-99);
         assert_eq!(lib.position(), Some(0));
     }
 
