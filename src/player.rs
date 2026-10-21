@@ -80,8 +80,11 @@ pub fn probe_duration(path: &Path) -> Option<Duration> {
     let file = File::open(path).ok()?;
     let decoder = Decoder::new(BufReader::new(file)).ok()?;
     let rate = f64::from(decoder.sample_rate().get());
-    let samples = decoder.count() as u64;
-    Some(Duration::from_secs_f64(samples as f64 / rate))
+    let channels = f64::from(decoder.channels().get());
+    // Decoder 是逐样本迭代的，立体声每帧产出两个样本，
+    // 只除以采样率会把时长算成两倍。
+    let samples = decoder.count() as f64;
+    Some(Duration::from_secs_f64(samples / (rate * channels)))
 }
 
 pub struct Player {
@@ -644,5 +647,72 @@ mod duration_cache_tests {
             after > before,
             "漂移校正之后时钟必须继续走，之前是 {before:?} 现在是 {after:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod duration_channel_tests {
+    use super::*;
+
+    fn write_wav_channels(
+        name: &str,
+        seconds: u32,
+        channels: u16,
+        rate: u32,
+    ) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("music_shell_test_channels");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.wav"));
+        let frames = rate * seconds;
+        let data_len = frames * u32::from(channels) * 2;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_len).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&channels.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * u32::from(channels) * 2).to_le_bytes());
+        out.extend_from_slice(&(channels * 2).to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_len.to_le_bytes());
+        out.resize(out.len() + data_len as usize, 0);
+        std::fs::write(&path, out).unwrap();
+        path
+    }
+
+    #[test]
+    fn mono_duration_is_correct() {
+        let path = write_wav_channels("mono", 10, 1, 44_100);
+        let d = probe_duration(&path).unwrap();
+        assert!((d.as_secs_f64() - 10.0).abs() < 0.05, "{d:?}");
+    }
+
+    #[test]
+    fn stereo_duration_is_not_doubled() {
+        let path = write_wav_channels("stereo", 10, 2, 44_100);
+        let d = probe_duration(&path).unwrap();
+        assert!(
+            (d.as_secs_f64() - 10.0).abs() < 0.05,
+            "立体声时长被算成了 {d:?}，应该是 10s 附近"
+        );
+    }
+
+    #[test]
+    fn five_one_channels_are_handled() {
+        let path = write_wav_channels("surround", 8, 6, 48_000);
+        let d = probe_duration(&path).unwrap();
+        assert!((d.as_secs_f64() - 8.0).abs() < 0.05, "{d:?}");
+    }
+
+    #[test]
+    fn the_player_uses_the_corrected_duration() {
+        let path = write_wav_channels("player_stereo", 6, 2, 44_100);
+        let mut p = Player::new(1.0, true);
+        p.play(&Track::from_path(path)).unwrap();
+        assert_eq!(p.duration().as_secs(), 6);
     }
 }
