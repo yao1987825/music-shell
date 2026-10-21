@@ -104,12 +104,25 @@ cargo build --release
 
 ```
 src/
-  lib.rs        crate 出口，导出下面三个模块
-  config.rs     配置结构体、加载/写回/夹紧、主题配色
-  playlist.rs   Track / Playlist / Library：目录扫描、随机顺序、前进后退历史
-  player.rs     rodio 封装：打开设备、解码、播放/暂停、音量、时长探测
-  main.rs       CLI 参数、REPL 主循环、菜单渲染、命令分发
+  lib.rs        crate 出口，导出下面这些模块
+  config.rs     配置结构体、加载/写回前校验、主题配色
+  command.rs    Command 枚举 + 解析：输入字符串 → 结构化命令
+  capability.rs 格式能力判定：可播放 / 需转码 / 不支持
+  playlist.rs   Track / Playlist / Library：扫描、随机顺序、前进后退历史
+  player.rs     rodio 封装 + 逻辑时钟：打开设备、解码、播放/暂停、音量、时长探测
+  render.rs     终端渲染：整屏绘制 + 增量刷新（只重画进度条那一行）
+  main.rs       CLI 参数、REPL 主循环、App 状态机
 ```
+
+职责划分：
+
+| 模块 | 职责 |
+| --- | --- |
+| `App`（main.rs） | 只管状态和控制：应用命令、推进播放状态机 |
+| `Renderer`（render.rs） | 只管画：把状态渲染成字符串，增量更新 |
+| `Command`（command.rs） | 只管解析：输入 → 结构化命令，不碰状态 |
+| `Player`（player.rs） | 只管播放：设备、解码、时钟，不碰 UI |
+| `Capability`（capability.rs） | 只管判定：这个文件能不能放、为什么不能 |
 
 `lib` + `bin` 拆分是为了能跑单元测试（`cargo test`）并让别的 crate 复用这几块逻辑。
 
@@ -151,10 +164,75 @@ src/
 cargo run --release --example probe -- ~/Music/*
 ```
 
+## 已知限制
+
+- **Opus 不支持。** rodio 0.22 完全没有 Opus 支持（它的 `lewton` 特性是 Vorbis 不是 Opus，symphonia 也不带 Opus codec）。要支持得引入 `symphonia-adapter-libopus`（依赖 C 库 libopus）。
+- **m4a/mp4 要求 `moov` 在文件前部。** ffmpeg 默认把 `moov` 写在文件末尾，symphonia 找不到。`ffmpeg -i in.m4a -c copy -movflags +faststart out.m4a` 转一下即可（`-c copy` 不重编码）。
+- **时长的探测靠完整解码。** `probe_duration` 把文件解码一遍数采样，长文件会卡一下。更大的音乐库应该建库时批量探测并缓存。
+- **没有音频标签。** 曲名取自文件名，艺术家取自父目录名，不读 ID3/Vorbis 标签。
+- **SSH 断开进程即终止。** 长期跑请用 tmux 或 systemd --user。
+- **纯终端界面。** 没有鼠标支持，没有 TUI 组件库依赖。
+
+## 未来计划
+
+- 读 ID3 / Vorbis / MP4 标签，取代文件名和目录名
+- 建库时批量探测时长并落盘缓存
+- 引入 `symphonia-adapter-libopus` 支持 Opus
+- 扫描选项（`ignore_hidden` / `max_depth` / `sort_by`）接到配置文件里
+- 快捷键绑定，以及可脚本化的 `--exec` 批处理模式
+- 播放列表支持通配符和自动更新
+
+## 扩展到更多格式
+
+解码能力完全取决于 rodio 启用的 symphonia feature。改 `Cargo.toml` 里的 feature 列表即可：
+
+```toml
+rodio = { version = "0.22", default-features = false, features = [
+    "playback", "mp3", "flac", "wav", "vorbis", "mp4", "symphonia-aiff",
+] }
+```
+
+想加 Opus 还需要引入 `symphonia-adapter-libopus` 并在 `src/player.rs` 里接上它的解码器。改完记得同步 `src/capability.rs` 的 `Capability::of`，让界面能给出正确提示。
+
+用这个探针快速验证某个格式能不能解：
+
+```bash
+cargo run --release --example probe -- ~/Music/*
+```
+
+## 单元测试最小用例
+
+跑全量：
+
+```bash
+cargo test
+```
+
+只想测某一个模块：
+
+```bash
+cargo test --lib playlist          # 只跑 playlist 相关
+cargo test --lib shuffle_tests     # 只跑随机播放那组
+cargo test --lib config::tests::volume_converts_both_ways   # 精确到单个用例
+```
+
+加新用例的套路是：临时目录里造数据 → 调 API → 断言 → 清理。目录用 `std::env::temp_dir()` 拼一个专属名字，别和别的测试撞：
+
+```rust
+#[test]
+fn 例子() {
+    let dir = std::env::temp_dir().join("music_shell_test_例子");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // ... 造数据、断言 ...
+    let _ = std::fs::remove_dir_all(&dir);
+}
+```
+
 ## 开发
 
 ```bash
-cargo test              # 33 个单元测试
+cargo test              # 67 个单元测试
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 ```

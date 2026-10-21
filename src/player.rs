@@ -9,6 +9,43 @@ use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player as RodioPlayer, 
 use crate::playlist::Track;
 
 pub const SILENCE_EPSILON: Duration = Duration::from_millis(250);
+pub const DRIFT_TOLERANCE: Duration = Duration::from_millis(400);
+
+#[derive(Debug, Default)]
+struct Clock {
+    accumulated: Duration,
+    started: Option<Instant>,
+}
+
+impl Clock {
+    fn now(&self) -> Duration {
+        self.accumulated + self.started.map(|s| s.elapsed()).unwrap_or_default()
+    }
+
+    fn restart(&mut self) {
+        self.accumulated = Duration::ZERO;
+        self.started = Some(Instant::now());
+    }
+
+    fn pause(&mut self) {
+        self.accumulated = self.now();
+        self.started = None;
+    }
+
+    fn resume(&mut self) {
+        self.started = Some(Instant::now());
+    }
+
+    fn reset(&mut self) {
+        self.accumulated = Duration::ZERO;
+        self.started = None;
+    }
+
+    fn force(&mut self, value: Duration) {
+        self.accumulated = value;
+        self.started = None;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -42,8 +79,7 @@ pub struct Player {
     state: State,
     volume: f32,
     duration: Duration,
-    elapsed: Duration,
-    anchor: Option<Instant>,
+    clock: Clock,
 }
 
 impl Player {
@@ -55,8 +91,7 @@ impl Player {
             state: State::Stopped,
             volume: volume.clamp(0.0, 1.0),
             duration: Duration::ZERO,
-            elapsed: Duration::ZERO,
-            anchor: None,
+            clock: Clock::default(),
         };
         if force_silent {
             return this;
@@ -115,8 +150,7 @@ impl Player {
             player.play();
         }
         self.duration = duration;
-        self.elapsed = Duration::ZERO;
-        self.anchor = Some(Instant::now());
+        self.clock.restart();
         self.state = State::Playing;
         Ok(())
     }
@@ -124,15 +158,14 @@ impl Player {
     pub fn toggle_pause(&mut self) {
         match self.state {
             State::Playing => {
-                self.elapsed = self.position();
-                self.anchor = None;
+                self.clock.pause();
                 if let Some(player) = &self.rodio {
                     player.pause();
                 }
                 self.state = State::Paused;
             }
             State::Paused => {
-                self.anchor = Some(Instant::now());
+                self.clock.resume();
                 if let Some(player) = &self.rodio {
                     player.play();
                 }
@@ -148,20 +181,24 @@ impl Player {
             player.stop();
         }
         self.state = State::Stopped;
-        self.elapsed = Duration::ZERO;
-        self.anchor = None;
+        self.clock.reset();
         self.duration = Duration::ZERO;
     }
 
     pub fn position(&self) -> Duration {
-        if let Some(player) = &self.rodio
-            && self.state == State::Playing
-        {
-            return player.get_pos();
+        self.clock.now()
+    }
+
+    pub fn tick(&mut self) {
+        if self.state != State::Playing {
+            return;
         }
-        match self.anchor {
-            Some(start) if self.state == State::Playing => self.elapsed + start.elapsed(),
-            _ => self.elapsed,
+        let Some(player) = &self.rodio else {
+            return;
+        };
+        let device = player.get_pos();
+        if device.abs_diff(self.clock.now()) > DRIFT_TOLERANCE {
+            self.clock.force(device);
         }
     }
 
@@ -177,11 +214,8 @@ impl Player {
         if self.state != State::Playing {
             return false;
         }
-        if let Some(player) = &self.rodio {
-            return player.empty();
-        }
         if self.duration.is_zero() {
-            return false;
+            return self.rodio.as_ref().is_some_and(|p| p.empty());
         }
         self.position() + SILENCE_EPSILON >= self.duration
     }
@@ -323,5 +357,118 @@ mod tests {
         let mut p = Player::new(1.0, true);
         let missing = Track::from_path(std::path::PathBuf::from("/nope/none.mp3"));
         assert!(p.play(&missing).is_err());
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    fn wav(name: &str, seconds: u32) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("music_shell_test_clock");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.wav"));
+        let rate = 8_000u32;
+        let samples = rate * seconds;
+        let data_len = samples * 2;
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_len).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 2).to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_len.to_le_bytes());
+        out.resize(out.len() + data_len as usize, 0);
+        std::fs::write(&path, &out).unwrap();
+        path
+    }
+
+    fn player_on(path: &std::path::Path) -> Player {
+        let mut p = Player::new(1.0, true);
+        p.play(&Track::from_path(path.to_path_buf())).unwrap();
+        p
+    }
+
+    #[test]
+    fn the_clock_only_advances_while_playing() {
+        let path = wav("adv", 5);
+        let mut p = player_on(&path);
+        std::thread::sleep(Duration::from_millis(200));
+        let a = p.position();
+        assert!(a > Duration::ZERO, "播放时位置没推进");
+        p.toggle_pause();
+        let frozen = p.position();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(p.position(), frozen, "暂停后位置还在走");
+        p.toggle_pause();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(p.position() > frozen, "继续后位置没接着走");
+    }
+
+    #[test]
+    fn pausing_does_not_lose_elapsed_time() {
+        let path = wav("keep", 5);
+        let mut p = player_on(&path);
+        std::thread::sleep(Duration::from_millis(300));
+        let before = p.position();
+        p.toggle_pause();
+        assert!(p.position() >= before);
+        assert!(p.position() < Duration::from_millis(600));
+    }
+
+    #[test]
+    fn stop_resets_the_clock_entirely() {
+        let path = wav("reset", 5);
+        let mut p = player_on(&path);
+        std::thread::sleep(Duration::from_millis(150));
+        p.stop();
+        assert_eq!(p.position(), Duration::ZERO);
+        assert_eq!(p.duration(), Duration::ZERO);
+    }
+
+    #[test]
+    fn switching_tracks_resets_the_clock() {
+        let a = wav("a", 5);
+        let b = wav("b", 5);
+        let mut p = player_on(&a);
+        std::thread::sleep(Duration::from_millis(200));
+        p.play(&Track::from_path(b)).unwrap();
+        assert!(
+            p.position() < Duration::from_millis(100),
+            "换歌后位置没归零"
+        );
+    }
+
+    #[test]
+    fn position_never_exceeds_the_duration() {
+        let path = wav("clamp", 1);
+        let p = player_on(&path);
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(p.position() <= p.duration() + Duration::from_millis(500));
+        assert!(p.ratio() <= 1.0);
+    }
+
+    #[test]
+    fn a_short_track_is_reported_as_finished() {
+        let path = wav("tiny", 1);
+        let p = player_on(&path);
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(p.finished());
+    }
+
+    #[test]
+    fn tick_does_not_move_a_paused_clock() {
+        let path = wav("tick", 5);
+        let mut p = player_on(&path);
+        p.toggle_pause();
+        let before = p.position();
+        p.tick();
+        assert_eq!(p.position(), before);
     }
 }

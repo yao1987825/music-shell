@@ -3,6 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -97,20 +98,108 @@ pub fn is_audio(path: &Path) -> bool {
         .is_some_and(|e| AUDIO_EXTS.contains(&e.as_str()))
 }
 
-pub fn scan(dir: &Path) -> Vec<Track> {
-    if !dir.is_dir() {
-        return Vec::new();
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortBy {
+    #[default]
+    Path,
+    Title,
+    Modified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanOptions {
+    pub ignore_hidden: bool,
+    pub max_depth: Option<usize>,
+    pub sort_by: SortBy,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            ignore_hidden: true,
+            max_depth: None,
+            sort_by: SortBy::default(),
+        }
     }
-    let mut tracks: Vec<Track> = WalkDir::new(dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| is_audio(e.path()))
-        .map(|e| Track::from_path(e.into_path()))
-        .collect();
-    tracks.sort_by(|a, b| a.path.cmp(&b.path));
-    tracks
+}
+
+#[derive(Debug, Default)]
+pub struct ScanResult {
+    pub tracks: Vec<Track>,
+    pub unsupported: Vec<Track>,
+}
+
+fn is_hidden(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.starts_with('.'))
+        .unwrap_or(false)
+}
+
+pub fn scan(dir: &Path) -> Vec<Track> {
+    scan_with_options(dir, ScanOptions::default()).tracks
+}
+
+pub fn scan_with_options(dir: &Path, opts: ScanOptions) -> ScanResult {
+    if !dir.is_dir() {
+        return ScanResult::default();
+    }
+    let mut walker = WalkDir::new(dir).follow_links(false);
+    if let Some(depth) = opts.max_depth {
+        walker = walker.max_depth(depth);
+    }
+
+    let mut tracks: Vec<Track> = Vec::new();
+    let mut unsupported: Vec<Track> = Vec::new();
+    let mut modified: Vec<(std::time::SystemTime, usize)> = Vec::new();
+
+    for entry in walker.into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if opts.ignore_hidden && is_hidden(path) {
+            continue;
+        }
+        if !is_audio(path) {
+            continue;
+        }
+        let track = Track::from_path(path.to_path_buf());
+        if crate::capability::Capability::of(path).is_playable() {
+            if opts.sort_by == SortBy::Modified {
+                let mtime = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                modified.push((mtime, tracks.len()));
+                tracks.push(track);
+            } else {
+                tracks.push(track);
+            }
+        } else {
+            unsupported.push(track);
+        }
+    }
+
+    match opts.sort_by {
+        SortBy::Path => tracks.sort_by(|a, b| a.path.cmp(&b.path)),
+        SortBy::Title => tracks.sort_by(|a, b| a.title.cmp(&b.title).then(a.path.cmp(&b.path))),
+        SortBy::Modified => {
+            modified.sort_by_key(|(time, _)| std::cmp::Reverse(*time));
+            let reordered: Vec<Track> = modified
+                .iter()
+                .filter_map(|(_, i)| tracks.get(*i).cloned())
+                .collect();
+            tracks = reordered;
+        }
+    }
+    unsupported.sort_by(|a, b| a.path.cmp(&b.path));
+
+    ScanResult {
+        tracks,
+        unsupported,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,16 +258,11 @@ pub struct Library {
     pub cursor: Option<usize>,
     pub history: Vec<usize>,
     pub shuffle: bool,
-    seed: u64,
 }
 
 impl Library {
     pub fn set_tracks(&mut self, tracks: Vec<Track>) {
         self.tracks = tracks;
-        self.seed = self
-            .seed
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
         self.rebuild_order();
         self.cursor = if self.order.is_empty() { None } else { Some(0) };
         self.history.clear();
@@ -277,14 +361,7 @@ impl Library {
         if !self.shuffle {
             return;
         }
-        let mut state = self.seed | 1;
-        let len = self.order.len();
-        for i in (1..len).rev() {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            self.order.swap(i, (state % (i as u64 + 1)) as usize);
-        }
+        self.order.shuffle(&mut rand::rng());
     }
 }
 
@@ -509,5 +586,76 @@ mod mp4_tests {
         assert!(is_mp4_container(Path::new("a.mov")));
         assert!(!is_mp4_container(Path::new("a.mp3")));
         assert!(!is_mp4_container(Path::new("a.aac")));
+    }
+}
+
+#[cfg(test)]
+mod shuffle_tests {
+    use super::*;
+
+    fn library(n: usize) -> Library {
+        let mut lib = Library::default();
+        lib.set_tracks(
+            (0..n)
+                .map(|i| Track::from_path(PathBuf::from(format!("/m/{i:03}.mp3"))))
+                .collect(),
+        );
+        lib
+    }
+
+    fn permutation(lib: &Library) -> Vec<usize> {
+        lib.order.clone()
+    }
+
+    #[test]
+    fn shuffle_is_not_reproducible() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..40 {
+            let mut lib = library(12);
+            lib.set_shuffle(true);
+            seen.insert(permutation(&lib));
+        }
+        assert!(
+            seen.len() > 1,
+            "40 次洗牌得到了完全相同的顺序，随机源没生效"
+        );
+        assert!(seen.len() > 5, "洗牌结果过于集中：只有 {} 种", seen.len());
+    }
+
+    #[test]
+    fn shuffle_is_a_permutation_of_all_tracks() {
+        let mut lib = library(30);
+        lib.set_shuffle(true);
+        let mut got = permutation(&lib);
+        got.sort_unstable();
+        assert_eq!(got, (0..30).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn turning_shuffle_off_restores_the_natural_order() {
+        let mut lib = library(10);
+        lib.set_shuffle(true);
+        lib.set_shuffle(false);
+        assert_eq!(permutation(&lib), (0..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn toggling_shuffle_keeps_the_current_track_playing() {
+        let mut lib = library(15);
+        let current = lib.current().unwrap().path.clone();
+        lib.set_shuffle(true);
+        assert_eq!(lib.current().unwrap().path, current);
+    }
+
+    #[test]
+    fn every_track_appears_exactly_once_per_cycle() {
+        let mut lib = library(20);
+        lib.set_shuffle(true);
+        let mut visited = std::collections::HashSet::new();
+        for _ in 0..20 {
+            let t = lib.advance().unwrap();
+            assert!(visited.insert(t.path.clone()), "有曲目被重复播放");
+        }
+        assert_eq!(visited.len(), 20);
     }
 }

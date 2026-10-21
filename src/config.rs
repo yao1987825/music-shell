@@ -4,15 +4,32 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const APP_DIR: &str = "music-shell";
+pub const CONFIG_ENV: &str = "MUSIC_SHELL_CONFIG";
 
 pub fn app_dir() -> PathBuf {
-    dirs::config_dir()
+    config_root().join(APP_DIR)
+}
+
+pub fn config_root() -> PathBuf {
+    if let Some(dir) = dirs::config_dir() {
+        return dir;
+    }
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
+        let dir = PathBuf::from(dir);
+        if dir.is_absolute() {
+            return dir;
+        }
+    }
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(APP_DIR)
+        .join(".config")
 }
 
 pub fn default_path() -> PathBuf {
-    app_dir().join("config.json")
+    match std::env::var_os(CONFIG_ENV) {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => app_dir().join("config.json"),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -139,14 +156,55 @@ impl Config {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        let checked = self.validated()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("创建目录失败: {}", parent.display()))?;
         }
-        let text = serde_json::to_string_pretty(self).context("序列化配置失败")?;
+        let text = serde_json::to_string_pretty(&checked).context("序列化配置失败")?;
         std::fs::write(path, format!("{text}\n"))
             .with_context(|| format!("写入配置失败: {}", path.display()))?;
         Ok(())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.validated().map(|_| ())
+    }
+
+    pub fn validated(&self) -> Result<Self> {
+        let cfg = self.normalized();
+        if cfg.volume > 100 {
+            anyhow::bail!("volume 必须在 0-100 之间，当前是 {}", cfg.volume);
+        }
+        if cfg.library_path.as_os_str().is_empty() {
+            anyhow::bail!("library_path 不能为空");
+        }
+        if cfg.playlists_dir.as_os_str().is_empty() {
+            anyhow::bail!("playlists_dir 不能为空");
+        }
+        if !cfg.library_path.exists() {
+            std::fs::create_dir_all(&cfg.library_path).with_context(|| {
+                format!(
+                    "library_path 不存在且无法创建: {}",
+                    cfg.library_path.display()
+                )
+            })?;
+        }
+        if !cfg.library_path.is_dir() {
+            anyhow::bail!("library_path 不是目录: {}", cfg.library_path.display());
+        }
+        if !cfg.playlists_dir.exists() {
+            std::fs::create_dir_all(&cfg.playlists_dir).with_context(|| {
+                format!(
+                    "playlists_dir 不存在且无法创建: {}",
+                    cfg.playlists_dir.display()
+                )
+            })?;
+        }
+        if !cfg.playlists_dir.is_dir() {
+            anyhow::bail!("playlists_dir 不是目录: {}", cfg.playlists_dir.display());
+        }
+        Ok(cfg)
     }
 
     pub fn volume_f32(&self) -> f32 {
@@ -157,14 +215,15 @@ impl Config {
         self.volume = (value.clamp(0.0, 1.0) * 100.0).round() as u8;
     }
 
-    pub fn normalized(mut self) -> Self {
-        self.volume = self.volume.min(100);
-        self.window.width = self.window.width.clamp(40, 200);
-        self.window.height = self.window.height.clamp(10, 100);
-        if self.app_name.trim().is_empty() {
-            self.app_name = APP_DIR.to_string();
+    pub fn normalized(&self) -> Self {
+        let mut cfg = self.clone();
+        cfg.volume = cfg.volume.min(100);
+        cfg.window.width = cfg.window.width.clamp(40, 200);
+        cfg.window.height = cfg.window.height.clamp(10, 100);
+        if cfg.app_name.trim().is_empty() {
+            cfg.app_name = APP_DIR.to_string();
         }
-        self
+        cfg
     }
 }
 
@@ -237,5 +296,97 @@ mod tests {
     fn themes_use_distinct_accent_colors() {
         assert_ne!(Theme::Dark.accent(), Theme::Light.accent());
         assert_ne!(Theme::Dark.bar(), Theme::Light.bar());
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("music_shell_cfg_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn validation_creates_missing_directories() {
+        let root = temp_dir("create");
+        let lib = root.join("Music");
+        let pls = root.join("playlists");
+        let cfg = Config {
+            library_path: lib.clone(),
+            playlists_dir: pls.clone(),
+            ..Config::default()
+        };
+        cfg.validate().unwrap();
+        assert!(lib.is_dir());
+        assert!(pls.is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validation_rejects_a_path_that_is_not_a_directory() {
+        let root = temp_dir("notdir");
+        let file = root.join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        let cfg = Config {
+            library_path: file,
+            playlists_dir: root.join("pls"),
+            ..Config::default()
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("不是目录"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validation_rejects_empty_paths() {
+        let cfg = Config {
+            library_path: PathBuf::new(),
+            ..Config::default()
+        };
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("library_path")
+        );
+    }
+
+    #[test]
+    fn saving_normalizes_before_writing() {
+        let root = temp_dir("save");
+        let path = root.join("config.json");
+        let cfg = Config {
+            app_name: "  ".into(),
+            volume: 250,
+            window: Window {
+                width: 3,
+                height: 9999,
+            },
+            library_path: root.join("Music"),
+            playlists_dir: root.join("pls"),
+            ..Config::default()
+        };
+        cfg.save(&path).unwrap();
+        let back: Config = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back.volume, 100);
+        assert_eq!(back.app_name, APP_DIR);
+        assert_eq!(back.window.width, 40);
+        assert_eq!(back.window.height, 100);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn env_override_changes_the_default_config_path() {
+        let dir = temp_dir("env");
+        let custom = dir.join("elsewhere.json");
+        unsafe { std::env::set_var(CONFIG_ENV, &custom) };
+        assert_eq!(default_path(), custom);
+        unsafe { std::env::remove_var(CONFIG_ENV) };
+        assert!(default_path().ends_with("config.json"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

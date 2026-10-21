@@ -7,32 +7,14 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 
-use music_shell::config::{self, Config, Repeat, Theme};
+use music_shell::capability::Capability;
+use music_shell::command::Command;
+use music_shell::config::{self, Config, Repeat};
 use music_shell::player::{Player, State};
 use music_shell::playlist::{self, Library, Playlist, Track};
+use music_shell::render::{self, Renderer, View};
 
-const RESET: &str = "\x1b[0m";
-const DIM: &str = "\x1b[38;5;240m";
 const TICK: Duration = Duration::from_millis(200);
-
-const HELP: &[(&str, &str)] = &[
-    ("<数字>", "跳转并播放该曲目"),
-    ("p / 回车", "播放 / 暂停 / 继续"),
-    ("n", "下一首"),
-    ("b", "上一首"),
-    ("j / k", "光标下移 / 上移（不切换播放）"),
-    ("+ / -", "音量 ±5"),
-    ("l", "重新扫描音乐库"),
-    ("pl", "列出所有播放列表"),
-    ("pl <名字>", "加载播放列表"),
-    ("sv <名字>", "把当前列表存成播放列表"),
-    ("s", "随机播放开关"),
-    ("r", "循环模式 off → one → all"),
-    ("c", "重新载入 config.json"),
-    ("w", "把当前状态写回 config.json"),
-    ("?", "显示这份帮助"),
-    ("q", "退出"),
-];
 
 fn main() -> ExitCode {
     match run() {
@@ -119,7 +101,7 @@ fn run() -> Result<()> {
         player: Player::new(volume, args.no_audio),
         source: String::new(),
         status: String::new(),
-        last_render: String::new(),
+        renderer: Renderer::default(),
     };
     app.lib.set_shuffle(app.cfg.shuffle);
     app.relabel();
@@ -146,7 +128,7 @@ struct App {
     player: Player,
     source: String,
     status: String,
-    last_render: String,
+    renderer: Renderer,
 }
 
 impl App {
@@ -156,7 +138,7 @@ impl App {
                 "{} · {} 首 · 随机 {} · 循环 {}",
                 self.cfg.library_path.display(),
                 self.lib.len(),
-                onoff(self.cfg.shuffle),
+                render::onoff(self.cfg.shuffle),
                 self.cfg.repeat.label()
             );
         }
@@ -164,14 +146,16 @@ impl App {
 
     fn scan_library(&mut self) {
         let path = self.cfg.library_path.clone();
-        let tracks = playlist::scan(&path);
-        let count = tracks.len();
-        self.lib.set_tracks(tracks);
+        let result = playlist::scan_with_options(&path, playlist::ScanOptions::default());
+        let count = result.tracks.len();
+        let unsupported = result.unsupported.len();
+        self.lib.set_tracks(result.tracks);
         self.source = format!("{} · {count} 首", path.display());
-        self.status = if count == 0 {
-            format!("{} 下没有找到音频文件", path.display())
-        } else {
-            format!("已扫描 {count} 首曲目")
+        self.status = match (count, unsupported) {
+            (0, 0) => format!("{} 下没有找到音频文件", path.display()),
+            (0, n) => format!("{} 下的 {n} 个文件都放不了（格式不支持）", path.display()),
+            (c, 0) => format!("已扫描 {c} 首曲目"),
+            (c, n) => format!("已扫描 {c} 首曲目，{n} 个文件格式不支持"),
         };
     }
 
@@ -258,7 +242,7 @@ impl App {
         self.cfg.shuffle = !self.cfg.shuffle;
         self.lib.set_shuffle(self.cfg.shuffle);
         self.source = format!("{} · {} 首", self.source_base(), self.lib.len());
-        self.status = format!("随机播放 {}", onoff(self.cfg.shuffle));
+        self.status = format!("随机播放 {}", render::onoff(self.cfg.shuffle));
     }
 
     fn cycle_repeat(&mut self) {
@@ -362,57 +346,49 @@ impl App {
         }
     }
 
-    fn dispatch(&mut self, line: &str) -> bool {
-        let line = line.trim();
-        if line.is_empty() {
-            self.toggle_play();
-            return true;
-        }
-        if let Ok(index) = line.parse::<usize>() {
-            if (1..=self.lib.len()).contains(&index) {
-                if self.lib.select(index - 1).is_some() {
-                    self.play_cursor();
-                }
-            } else {
-                self.status = format!("序号超出范围 (1-{})", self.lib.len());
-            }
-            return true;
-        }
-
-        let (cmd, arg) = split_arg(line);
-        match cmd.as_str() {
-            "q" | "quit" | "exit" => return false,
-            "p" | "play" | "pause" | "space" | "enter" => self.toggle_play(),
-            "n" | "next" => {
+    fn dispatch(&mut self, command: Command) -> bool {
+        match command {
+            Command::Quit => return false,
+            Command::TogglePlay => self.toggle_play(),
+            Command::Next => {
                 if self.lib.advance().is_some() {
                     self.play_cursor();
                 }
             }
-            "b" | "prev" => {
+            Command::Prev => {
                 if self.lib.prev().is_some() {
                     self.play_cursor();
                 }
             }
-            "j" => self.lib.move_cursor(1),
-            "k" => self.lib.move_cursor(-1),
-            "+" | "=" | "up" => self.adjust_volume(5),
-            "-" | "_" | "down" => self.adjust_volume(-5),
-            "l" | "load" | "rescan" => self.scan_library(),
-            "s" | "shuffle" => self.toggle_shuffle(),
-            "r" | "repeat" => self.cycle_repeat(),
-            "c" | "reload" => self.reload_config(),
-            "w" | "write" => self.save_config(),
-            "pl" | "playlist" => match arg {
-                Some(name) => {
-                    self.load_playlist(name);
+            Command::CursorDown => self.lib.move_cursor(1),
+            Command::CursorUp => self.lib.move_cursor(-1),
+            Command::VolumeUp => self.adjust_volume(5),
+            Command::VolumeDown => self.adjust_volume(-5),
+            Command::PlayIndex(index) => {
+                if (1..=self.lib.len()).contains(&index) {
+                    if self.lib.select(index - 1).is_some() {
+                        self.play_cursor();
+                    }
+                } else {
+                    self.status = format!("序号超出范围 (1-{})", self.lib.len());
                 }
-                None => self.show_playlists(),
-            },
-            "sv" | "save" => {
-                self.save_playlist(arg);
             }
-            "?" | "h" | "help" => self.status = help_text(self.cfg.theme),
-            _ => self.status = format!("未知命令 `{cmd}`，输入 ? 看帮助"),
+            Command::Rescan => self.scan_library(),
+            Command::ToggleShuffle => self.toggle_shuffle(),
+            Command::CycleRepeat => self.cycle_repeat(),
+            Command::ReloadConfig => self.reload_config(),
+            Command::SaveConfig => self.save_config(),
+            Command::ListPlaylists => self.show_playlists(),
+            Command::LoadPlaylist(name) => {
+                self.load_playlist(&name);
+            }
+            Command::SavePlaylist(name) => {
+                self.save_playlist(Some(&name));
+            }
+            Command::Help => self.status = render::help_text(self.cfg.theme),
+            Command::Unknown(word) => {
+                self.status = format!("未知命令 `{word}`，输入 ? 看帮助");
+            }
         }
         true
     }
@@ -421,14 +397,15 @@ impl App {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || feed_stdin(tx));
         loop {
+            self.player.tick();
             if self.player.finished() && !self.on_track_end() {
                 break;
             }
             self.refresh();
             match rx.recv_timeout(TICK) {
                 Ok(Some(line)) => {
-                    let line = line.trim().to_string();
-                    if !self.dispatch(&line) {
+                    let command = Command::parse(line.trim());
+                    if !self.dispatch(command) {
                         break;
                     }
                 }
@@ -440,218 +417,73 @@ impl App {
         Ok(())
     }
 
-    fn signature(&self) -> String {
-        format!(
-            "{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}",
-            self.player.state().label(),
-            self.player.position().as_millis() / 200,
-            (self.player.ratio() * 100.0) as u32,
-            self.player.volume_percent(),
-            self.lib.len(),
-            self.lib.position(),
-            self.source,
-            self.status,
-            self.cfg.repeat.label(),
-            onoff(self.cfg.shuffle),
-        )
-    }
-
-    fn refresh(&mut self) {
-        let sig = self.signature();
-        if sig != self.last_render {
-            self.last_render = sig;
-            self.render();
-        }
-    }
-
-    fn render(&mut self) {
-        let theme = self.cfg.theme;
-        let width = self.cfg.window.width;
-        let height = self.cfg.window.height;
-        let mut out = String::from("\x1b[2J\x1b[H");
-        let backend = if self.player.silent {
-            "静音模式"
-        } else {
-            "音频已连接"
-        };
-
-        out.push_str(&format!(
-            "{}{}{}{} {}{}\n",
-            theme.accent(),
-            self.cfg.app_name,
-            RESET,
-            DIM,
-            backend,
-            RESET
-        ));
-        out.push_str(&format!("{DIM}{}{RESET}\n", rule(width)));
-        out.push_str(&self.now_playing(theme, width));
-        out.push_str(&format!("{DIM}{}{RESET}\n", rule(width)));
-        out.push_str(&self.track_view(theme, width, height.saturating_sub(10)));
-        out.push_str(&format!("{DIM}{}{RESET}\n", rule(width)));
-        out.push_str(&format!(
-            "{}状态 {}{RESET}  {DIM}随机 {}{RESET}  {DIM}循环 {}{RESET}\n",
-            theme.strong(),
-            self.player.state().label(),
-            onoff(self.cfg.shuffle),
-            self.cfg.repeat.label(),
-        ));
-        out.push_str(&format!(
-            "{DIM}{}{RESET}  {}»{RESET} {}\n",
-            self.source,
-            theme.accent(),
-            self.status
-        ));
-        out.push_str(&format!("{DIM}输入命令 (? 看帮助, q 退出) ›{RESET} "));
-
-        print!("{out}");
-        io::stdout().flush().ok();
-    }
-
-    fn now_playing(&self, theme: Theme, width: usize) -> String {
-        let bar_width = width.saturating_sub(28).clamp(10, 60);
-        let filled = (self.player.ratio() * bar_width as f32).round() as usize;
-        let bar = format!(
-            "{}{}{}{}{}",
-            theme.bar(),
-            "█".repeat(filled),
-            RESET,
-            DIM,
-            "░".repeat(bar_width.saturating_sub(filled))
-        );
+    fn view(&self) -> View {
         let (title, artist) = match self.lib.current() {
             Some(t) => (t.title.clone(), t.artist.clone()),
             None => ("—".to_string(), String::new()),
         };
-        format!(
-            "{}{title}{RESET} {DIM}— {artist}\n   {bar} {} / {}{RESET}\n",
-            theme.strong(),
-            fmt_time(self.player.position()),
-            fmt_time(self.player.duration()),
-        )
-    }
-
-    fn track_view(&self, theme: Theme, width: usize, rows: usize) -> String {
         let len = self.lib.len();
-        if len == 0 {
-            return format!("{DIM}(音乐库为空，输入 l 重新扫描){RESET}\n");
-        }
-        let rows = rows.clamp(3, 20);
         let cursor = self.lib.position().unwrap_or(0);
+        let rows = self.cfg.window.height.saturating_sub(11).clamp(3, 20);
         let start = cursor
             .saturating_sub(rows / 2)
             .min(len.saturating_sub(rows));
         let end = (start + rows).min(len);
 
-        let mut out = String::new();
+        let mut list = Vec::new();
         for pos in start..end {
-            let Some(track) = self.lib.track_at(pos) else {
-                continue;
-            };
-            let (icon, color) = if pos == cursor {
-                (">", theme.accent())
-            } else {
-                (" ", DIM)
-            };
-            let line = format!("{icon}{:>4}  {}", pos + 1, track.title);
-            let fill = width.saturating_sub(display_width(&line) + 25);
-            out.push_str(&format!(
-                "{color}{line}{}{RESET}{DIM}{}{RESET}\n",
-                " ".repeat(fill),
-                truncate(&track.artist, 24)
-            ));
+            if let Some(track) = self.lib.track_at(pos) {
+                list.push(render::Row {
+                    index: pos + 1,
+                    title: track.title.clone(),
+                    artist: track.artist.clone(),
+                    active: pos == cursor,
+                });
+            }
         }
-        out.push_str(&format!(
-            "{DIM}第 {}-{} / {len} 首{RESET}\n",
-            start + 1,
-            end
-        ));
-        out
-    }
-}
 
-fn split_arg(line: &str) -> (String, Option<&str>) {
-    match line.split_once(char::is_whitespace) {
-        Some((cmd, rest)) => {
-            let rest = rest.trim();
-            (cmd.to_lowercase(), (!rest.is_empty()).then_some(rest))
+        View {
+            app_name: self.cfg.app_name.clone(),
+            theme: self.cfg.theme,
+            width: self.cfg.window.width,
+            height: self.cfg.window.height,
+            backend: if self.player.silent {
+                "静音模式"
+            } else {
+                "音频已连接"
+            },
+            title,
+            artist,
+            state: self.player.state().label(),
+            position_secs: self.player.position().as_secs(),
+            duration_secs: self.player.duration().as_secs(),
+            ratio: self.player.ratio(),
+            volume: self.player.volume_percent(),
+            shuffle: self.cfg.shuffle,
+            repeat: self.cfg.repeat.label(),
+            source: self.source.clone(),
+            status: self.status.clone(),
+            empty_hint: len == 0,
+            range: format!("第 {}-{} / {len} 首", start + 1, end),
+            rows: list,
         }
-        None => (line.to_lowercase(), None),
+    }
+
+    fn refresh(&mut self) {
+        let view = self.view();
+        let frame = self.renderer.draw(&view);
+        if !frame.is_empty() {
+            print!("{frame}");
+            io::stdout().flush().ok();
+        }
     }
 }
 
 fn describe_failure(track: &Track, err: &anyhow::Error) -> String {
-    let name = &track.title;
-    if playlist::is_mp4_container(&track.path) && playlist::moov_at_end(&track.path) {
-        return format!(
-            "{name}（moov 在文件末尾，rodio 解析不了；用 ffmpeg -i in.m4a -c copy -movflags +faststart out.m4a 转换）"
-        );
+    match Capability::of(&track.path).hint(&track.path) {
+        Some(hint) => hint,
+        None => format!("{}（{err}）", track.title),
     }
-    if matches!(
-        track.path.extension().and_then(|e| e.to_str()),
-        Some("opus" | "oga")
-    ) {
-        return format!("{name}（{err}；rodio 0.22 不支持 Opus）");
-    }
-    format!("{name}（{err}）")
-}
-
-fn onoff(value: bool) -> &'static str {
-    if value { "on" } else { "off" }
-}
-
-fn rule(width: usize) -> String {
-    "─".repeat(width)
-}
-
-fn char_width(c: char) -> usize {
-    match c {
-        '\u{1100}'..='\u{115f}'
-        | '\u{2e80}'..='\u{a4cf}'
-        | '\u{ac00}'..='\u{d7a3}'
-        | '\u{f900}'..='\u{faff}'
-        | '\u{fe30}'..='\u{fe6f}'
-        | '\u{ff00}'..='\u{ff60}'
-        | '\u{ffe0}'..='\u{ffe6}' => 2,
-        _ => 1,
-    }
-}
-
-fn display_width(text: &str) -> usize {
-    text.chars().map(char_width).sum()
-}
-
-fn pad(text: &str, width: usize) -> String {
-    let text = truncate(text, width);
-    let fill = width.saturating_sub(display_width(&text));
-    format!("{text}{}", " ".repeat(fill))
-}
-
-fn truncate(text: &str, max: usize) -> String {
-    if display_width(text) <= max {
-        return text.to_string();
-    }
-    let head: String = text
-        .chars()
-        .scan(0usize, |acc, c| {
-            *acc += char_width(c);
-            if *acc > max.saturating_sub(1) {
-                None
-            } else {
-                Some(*acc)
-            }
-        })
-        .map(|_| ())
-        .zip(text.chars())
-        .take_while(|((), c)| *c != '\u{2026}')
-        .map(|(_, c)| c)
-        .collect();
-    format!("{head}…")
-}
-
-fn fmt_time(d: Duration) -> String {
-    let secs = d.as_secs();
-    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 fn feed_stdin(tx: Sender<Option<String>>) {
@@ -671,16 +503,4 @@ fn feed_stdin(tx: Sender<Option<String>>) {
             }
         }
     }
-}
-
-fn help_text(theme: Theme) -> String {
-    let mut out = String::from("\n");
-    for (key, desc) in HELP {
-        out.push_str(&format!(
-            "   {}{}{RESET}{desc}\n",
-            theme.accent(),
-            pad(key, 12)
-        ));
-    }
-    out.trim_end().to_string()
 }
