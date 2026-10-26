@@ -31,23 +31,42 @@ pub const RESET: &str = "\x1b[0m";
 pub const DIM: &str = "\x1b[38;5;240m";
 
 const HELP: &[(&str, &str)] = &[
-    ("<数字>", "跳转并播放该曲目"),
-    ("p / 回车", "播放 / 暂停 / 继续"),
-    ("n", "下一首"),
-    ("b", "上一首"),
-    ("j / k", "光标下移 / 上移（不切换播放）"),
+    ("↑ / ↓", "上一首 / 下一首（选中即播放）"),
+    ("← / →", "上一页 / 下一页（每页 10 首）"),
+    ("空格", "播放 / 暂停 / 继续"),
+    ("n / b", "下一首 / 上一首"),
+    ("p+回车", "播放 / 暂停 / 继续"),
+    ("s+回车", "随机播放开关"),
+    ("<数字>+回车", "跳到第 N 首并播放"),
     ("+ / -", "音量 ±5"),
     ("l", "重新扫描音乐库"),
     ("pl", "列出所有播放列表"),
     ("pl <名字>", "加载播放列表"),
     ("sv <名字>", "把当前列表存成播放列表"),
-    ("s", "随机播放开关"),
     ("r", "循环模式 off → one → all"),
     ("c", "重新载入 config.json"),
     ("w", "把当前状态写回 config.json"),
     ("?", "显示这份帮助"),
     ("q", "退出"),
 ];
+
+/// 播放状态。渲染层只认这三个状态，不关心播放器内部怎么转的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayState {
+    Stopped,
+    Playing,
+    Paused,
+}
+
+impl PlayState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stopped => "未播放",
+            Self::Playing => "播放中",
+            Self::Paused => "已暂停",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct View {
@@ -59,15 +78,16 @@ pub struct View {
     pub backend: &'static str,
     pub title: String,
     pub artist: String,
-    pub state: &'static str,
+    pub state: PlayState,
     pub position_secs: u64,
     pub duration_secs: u64,
-    pub ratio: f32,
     pub volume: u8,
     pub shuffle: bool,
     pub repeat: &'static str,
     pub source: String,
     pub status: String,
+    /// 正在输入、还没回车的那行命令
+    pub input: String,
     pub rows: Vec<Row>,
     pub range: String,
     pub empty_hint: bool,
@@ -76,40 +96,40 @@ pub struct View {
 #[derive(Debug, Default)]
 pub struct Renderer {
     last_head: String,
-    last_progress: String,
+    last_middle: String,
     last_tail: String,
     drawn: bool,
 }
 
 impl Renderer {
     pub fn draw(&mut self, view: &View) -> String {
-        let (head, progress, tail) = render_parts(view);
+        let (head, middle, tail) = render_parts(view);
         if self.drawn && head == self.last_head && tail == self.last_tail {
-            if progress == self.last_progress {
+            if middle == self.last_middle {
                 return String::new();
             }
-            self.last_progress = progress.clone();
+            self.last_middle = middle.clone();
             if !view.style.ansi {
-                return format!("{progress}\n");
+                return format!("{middle}\n");
             }
             let row = head.lines().count() + 1;
-            return format!("\x1b[s\x1b[{row};1H\x1b[2K{progress}\x1b[u");
+            return format!("\x1b[s\x1b[{row};1H\x1b[2K{middle}\x1b[u");
         }
         self.drawn = true;
         self.last_head = head.clone();
-        self.last_progress = progress.clone();
+        self.last_middle = middle.clone();
         self.last_tail = tail.clone();
         if view.style.ansi {
-            format!("\x1b[2J\x1b[H{head}{progress}\n{tail}")
+            format!("\x1b[2J\x1b[H{head}{middle}\n{tail}")
         } else {
-            format!("{head}{progress}\n{tail}")
+            format!("{head}{middle}\n{tail}")
         }
     }
 
     pub fn reset(&mut self) {
         self.drawn = false;
         self.last_head.clear();
-        self.last_progress.clear();
+        self.last_middle.clear();
         self.last_tail.clear();
     }
 }
@@ -128,7 +148,7 @@ pub fn help_text(theme: Theme) -> String {
         out.push_str(&format!(
             "   {}{}{RESET}{desc}\n",
             theme.accent(),
-            pad(key, 12)
+            pad(key, 14)
         ));
     }
     out.trim_end().to_string()
@@ -154,7 +174,7 @@ pub fn render_parts(view: &View) -> (String, String, String) {
     head.push_str(&st.paint(theme.strong(), &fit(&now_playing, width)));
     head.push('\n');
 
-    let progress = progress_line(view);
+    let middle = status_line(view);
 
     let mut tail = String::new();
     tail.push_str(&st.paint(DIM, &rule(width)));
@@ -186,10 +206,10 @@ pub fn render_parts(view: &View) -> (String, String, String) {
     tail.push_str(&st.paint(DIM, &rule(width)));
     tail.push('\n');
     let state_line = format!(
-        "状态 {}  随机 {}  循环 {}",
-        view.state,
+        "随机 {}  循环 {}  音量 {}%",
         onoff(view.shuffle),
-        view.repeat
+        view.repeat,
+        view.volume
     );
     tail.push_str(&st.paint(theme.strong(), &fit(&state_line, width)));
     tail.push('\n');
@@ -202,28 +222,47 @@ pub fn render_parts(view: &View) -> (String, String, String) {
         tail.push('\n');
     }
     tail.push_str(&st.paint(DIM, "输入命令 (? 看帮助, q 退出) › "));
-    (head, progress, tail)
+    // 正在输入的那行字跟在提示符后面，敲了什么一眼就能看见
+    if !view.input.is_empty() {
+        tail.push_str(&st.paint(theme.strong(), &view.input));
+    }
+    (head, middle, tail)
 }
 
 pub fn render(view: &View) -> String {
-    let (head, progress, tail) = render_parts(view);
-    format!("{head}{progress}\n{tail}")
+    let (head, middle, tail) = render_parts(view);
+    format!("{head}{middle}\n{tail}")
 }
 
-pub fn progress_line(view: &View) -> String {
-    let bar_width = view.width.saturating_sub(28).clamp(10, 60);
-    let filled = (view.ratio * bar_width as f32).round() as usize;
-    let bar = format!(
-        "{}{}",
-        view.style.paint(view.theme.bar(), &"█".repeat(filled)),
-        view.style
-            .paint(DIM, &"░".repeat(bar_width.saturating_sub(filled)))
-    );
-    format!(
-        "   {bar} {} / {}",
+/// 曲名下面那一行：播放状态 + 时间。
+/// 终端里画进度条纯属多此一举，直接给时间和状态更贴切。
+pub fn status_line(view: &View) -> String {
+    let st = view.style;
+    let (icon, text) = match view.state {
+        PlayState::Playing => ("▶", "正在播放"),
+        PlayState::Paused => ("‖", "已暂停"),
+        PlayState::Stopped => ("○", "未播放"),
+    };
+    let time = format!(
+        "{} / {}",
         fmt_time(view.position_secs),
         fmt_time(view.duration_secs)
-    )
+    );
+    let plain = format!("   {icon}  {text}   {time}");
+    if display_width(&plain) <= view.width {
+        format!(
+            "   {}  {}   {}",
+            st.paint(view.theme.accent(), icon),
+            st.paint(view.theme.strong(), text),
+            st.paint(DIM, &time)
+        )
+    } else {
+        format!(
+            "   {}  {}",
+            st.paint(view.theme.strong(), text),
+            st.paint(DIM, &time)
+        )
+    }
 }
 
 pub fn onoff(value: bool) -> &'static str {
@@ -320,33 +359,64 @@ mod tests {
     }
 
     #[test]
-    fn the_progress_bar_reflects_the_ratio() {
+    fn the_status_line_shows_the_time_and_the_state() {
         let view = View {
             app_name: "x".into(),
             theme: Theme::Dark,
-            style: Style::new(true),
+            style: Style::new(false),
             width: 60,
             height: 24,
             backend: "静音模式",
             title: "t".into(),
             artist: "a".into(),
-            state: "playing",
+            state: PlayState::Playing,
             position_secs: 30,
             duration_secs: 60,
-            ratio: 0.5,
             volume: 70,
             shuffle: false,
             repeat: "off",
             source: "s".into(),
             status: String::new(),
+            input: String::new(),
             rows: Vec::new(),
             range: String::new(),
             empty_hint: true,
         };
-        let line = progress_line(&view);
-        assert!(line.contains('█'));
-        assert!(line.contains('░'));
-        assert!(line.contains("0:30 / 1:00"));
+        let line = status_line(&view);
+        assert!(line.contains("正在播放"), "{line}");
+        assert!(line.contains("0:30 / 1:00"), "{line}");
+        assert!(!line.contains('█'), "不该再有进度条: {line}");
+        assert!(!line.contains('░'), "不该再有进度条: {line}");
+    }
+
+    #[test]
+    fn a_paused_player_says_it_is_paused() {
+        let view = View {
+            app_name: "x".into(),
+            theme: Theme::Dark,
+            style: Style::new(false),
+            width: 60,
+            height: 24,
+            backend: "静音模式",
+            title: "t".into(),
+            artist: "a".into(),
+            state: PlayState::Paused,
+            position_secs: 30,
+            duration_secs: 60,
+            volume: 70,
+            shuffle: false,
+            repeat: "off",
+            source: "s".into(),
+            status: String::new(),
+            input: String::new(),
+            rows: Vec::new(),
+            range: String::new(),
+            empty_hint: true,
+        };
+        assert!(status_line(&view).contains("已暂停"));
+        assert_eq!(PlayState::Paused.label(), "已暂停");
+        assert_eq!(PlayState::Playing.label(), "播放中");
+        assert_eq!(PlayState::Stopped.label(), "未播放");
     }
 }
 
@@ -364,15 +434,15 @@ mod layout_tests {
             backend: "静音模式",
             title: "一首很长的曲子名字".into(),
             artist: "某个很长的艺术家名字".into(),
-            state: "playing",
+            state: PlayState::Playing,
             position_secs: 61,
             duration_secs: 454,
-            ratio: 0.13,
             volume: 70,
             shuffle: true,
             repeat: "one",
             source: "/很长的音乐库路径/with/a/very/long/path/子目录".into(),
             status: "已扫描 12345 首曲目".into(),
+            input: String::new(),
             rows: vec![Row {
                 index: 1,
                 title: "曲目标题".into(),
@@ -469,15 +539,15 @@ mod status_tests {
             backend: "静音模式",
             title: "t".into(),
             artist: "a".into(),
-            state: "playing",
+            state: PlayState::Playing,
             position_secs: 0,
             duration_secs: 0,
-            ratio: 0.0,
             volume: 70,
             shuffle: false,
             repeat: "off",
             source: "src".into(),
             status,
+            input: String::new(),
             rows: Vec::new(),
             range: String::new(),
             empty_hint: true,

@@ -70,6 +70,31 @@ impl Command {
     }
 }
 
+/// 这些命令的动词后面可以带参数。
+/// 打这几个字的时候先不急着执行："p" 可能是 "pl <名字>"，"s" 可能是 "sv <名字>"。
+const VERBS_WITH_ARG: &[&str] = &["pl", "sv"];
+
+/// 这段文字敲完可以直接执行吗？
+///
+/// 规则：
+/// - 带空格的命令要按回车（"pl work" 这种）
+/// - 纯数字要按回车，否则 "12" 会被当成第 1 首
+/// - "p" / "s" / "pl" / "sv" 要按回车，因为后面可能还跟着参数
+/// - 其余单键命令敲一下就生效
+pub fn is_instant(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() || t.contains(|c: char| c.is_whitespace()) {
+        return false;
+    }
+    if t.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    if VERBS_WITH_ARG.iter().any(|verb| verb.starts_with(t)) {
+        return false;
+    }
+    !matches!(Command::parse(t), Command::Unknown(_))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +162,37 @@ mod tests {
     fn unknown_input_is_preserved_for_the_error_message() {
         assert_eq!(Command::parse("wat"), Command::Unknown("wat".into()));
         assert_eq!(Command::parse("wat now"), Command::Unknown("wat".into()));
+    }
+
+    #[test]
+    fn single_key_commands_fire_without_enter() {
+        for key in ["q", "n", "b", "l", "r", "c", "w", "?", "+", "-"] {
+            assert!(is_instant(key), "{key} 应该敲一下就生效");
+        }
+    }
+
+    #[test]
+    fn numbers_wait_for_enter() {
+        assert!(!is_instant("5"));
+        assert!(!is_instant("12"));
+    }
+
+    #[test]
+    fn verbs_that_take_an_argument_wait_for_enter() {
+        for text in ["p", "s", "pl", "sv"] {
+            assert!(!is_instant(text), "{text} 后面可能还跟着参数");
+        }
+    }
+
+    #[test]
+    fn commands_with_a_space_wait_for_enter() {
+        assert!(!is_instant("pl work"));
+        assert!(!is_instant("sv work"));
+    }
+
+    #[test]
+    fn nonsense_is_not_instant() {
+        assert!(!is_instant("zzz"));
+        assert!(!is_instant(""));
     }
 }

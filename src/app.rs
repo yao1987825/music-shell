@@ -14,10 +14,9 @@ use crate::player::{Player, State};
 use crate::renderer::{self, Renderer, Style, View};
 
 pub const TICK: Duration = Duration::from_millis(200);
-const PAGE: isize = 10;
 
-/// 渲染结果里第一行曲目所在的行号：标题1 分隔2 曲名3 进度4 分隔5
-const TRACK_ROW_OFFSET: usize = 6;
+/// 一页显示多少首曲目。左右键按页翻。
+pub const PAGE_SIZE: usize = 10;
 
 pub struct App {
     cfg: Config,
@@ -26,10 +25,10 @@ pub struct App {
     player: Player,
     source: String,
     status: String,
+    /// 正在输入、还没回车的那行命令，显示在提示符后面
+    input: String,
     renderer: Renderer,
     style: Style,
-    /// 硬件光标停在哪一行；None 表示回到输入行
-    focus_row: Option<usize>,
 }
 
 impl App {
@@ -41,9 +40,9 @@ impl App {
             player,
             source: String::new(),
             status: String::new(),
+            input: String::new(),
             renderer: Renderer::default(),
             style: Style::detect(),
-            focus_row: None,
         };
         app.lib.set_shuffle(app.cfg.shuffle);
         app.relabel();
@@ -124,7 +123,7 @@ impl App {
             State::Stopped => self.play_cursor(),
             _ => {
                 self.player.toggle_pause();
-                self.status = format!("状态 {}", self.player.state().label());
+                self.status = state_label(self.player.state()).to_string();
             }
         }
     }
@@ -308,10 +307,10 @@ impl App {
         }
     }
 
-    /// 执行命令。返回 true 表示这是导航动作，光标应停在选中行上。
-    pub fn dispatch(&mut self, command: Command) -> bool {
+    /// 执行命令。
+    pub fn dispatch(&mut self, command: Command) {
         match command {
-            Command::Quit => return false,
+            Command::Quit => {}
             Command::TogglePlay => self.toggle_play(),
             Command::Next => {
                 if self.lib.advance().is_some() {
@@ -323,41 +322,27 @@ impl App {
                     self.play_cursor();
                 }
             }
-            Command::CursorDown => {
-                self.lib.move_cursor(1);
-                return true;
-            }
-            Command::CursorUp => {
-                self.lib.move_cursor(-1);
-                return true;
-            }
-            Command::CursorHome => {
-                if !self.lib.is_empty() {
-                    self.lib.select(0);
-                    return true;
-                }
-            }
+            Command::CursorDown => self.move_selection(1),
+            Command::CursorUp => self.move_selection(-1),
+            Command::CursorHome => self.select_index(0),
             Command::CursorEnd => {
-                if !self.lib.is_empty() {
-                    self.lib.select(self.lib.len() - 1);
-                    return true;
-                }
+                let last = self.lib.len().saturating_sub(1);
+                self.select_index(last);
             }
             Command::PageUp => {
-                self.lib.move_cursor(-PAGE);
-                return true;
+                let page = self.page_index().saturating_sub(1);
+                self.goto_page(page);
             }
             Command::PageDown => {
-                self.lib.move_cursor(PAGE);
-                return true;
+                let last = self.page_count().saturating_sub(1);
+                let page = (self.page_index() + 1).min(last);
+                self.goto_page(page);
             }
             Command::VolumeUp => self.adjust_volume(5),
             Command::VolumeDown => self.adjust_volume(-5),
             Command::PlayIndex(index) => {
                 if (1..=self.lib.len()).contains(&index) {
-                    if self.lib.select(index - 1).is_some() {
-                        self.play_cursor();
-                    }
+                    self.select_index(index - 1);
                 } else {
                     self.status = format!("序号超出范围 (1-{})", self.lib.len());
                 }
@@ -379,7 +364,49 @@ impl App {
                 self.status = format!("未知命令 `{word}`，输入 ? 看帮助");
             }
         }
-        false
+    }
+
+    /// 上下键：移动选中行，选中哪首就播哪首。
+    /// 顶到头或底时什么都不做，不重新播放当前这首。
+    fn move_selection(&mut self, delta: isize) {
+        if self.lib.is_empty() {
+            return;
+        }
+        let before = self.lib.position();
+        self.lib.move_cursor(delta);
+        if self.lib.position() == before {
+            return;
+        }
+        self.play_cursor();
+    }
+
+    /// 选中第 index 首并播放
+    fn select_index(&mut self, index: usize) {
+        if self.lib.select(index).is_some() {
+            self.play_cursor();
+        }
+    }
+
+    /// 跳到第 page 页，并播放这一页的第一首
+    fn goto_page(&mut self, page: usize) {
+        if self.lib.is_empty() {
+            return;
+        }
+        let index = page * PAGE_SIZE;
+        if index >= self.lib.len() {
+            return;
+        }
+        self.select_index(index);
+    }
+
+    /// 当前选中的曲目在第几页（从 0 开始）
+    fn page_index(&self) -> usize {
+        self.lib.position().unwrap_or(0) / PAGE_SIZE
+    }
+
+    /// 一共几页
+    fn page_count(&self) -> usize {
+        self.lib.len().div_ceil(PAGE_SIZE)
     }
 
     pub fn repl(&mut self) -> Result<()> {
@@ -395,18 +422,22 @@ impl App {
             match rx.recv_timeout(TICK) {
                 Ok(Input::Eof) => break,
                 Ok(item) => {
-                    let Some(command) = item.to_command() else {
+                    // 正在输入的那行文字不是命令，只是显示在提示符后面
+                    let command = match item {
+                        Input::Pending(text) => {
+                            self.input = text;
+                            continue;
+                        }
+                        other => other.to_command(),
+                    };
+                    let Some(command) = command else {
                         continue;
                     };
                     if command == Command::Quit {
                         break;
                     }
-                    let was_navigation = self.dispatch(command);
-                    if was_navigation {
-                        self.focus_row = self.selected_row();
-                    } else {
-                        self.focus_row = None;
-                    }
+                    self.input.clear();
+                    self.dispatch(command);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -417,30 +448,28 @@ impl App {
         Ok(())
     }
 
+    /// 列表区最多显示多少行。终端不够高时少显示几行，但一页仍是 PAGE_SIZE 首。
     fn list_rows(&self) -> usize {
-        self.cfg.window.height.saturating_sub(11).clamp(3, 20)
+        self.effective_height()
+            .saturating_sub(12)
+            .clamp(3, PAGE_SIZE)
     }
 
-    fn list_start(&self, rows: usize, cursor: usize) -> usize {
+    /// 当前页里实际要显示的那一段。
+    /// 页内放不下时（比如终端很矮）窗口在页内滚动，保证选中项始终可见。
+    fn visible_range(&self, cursor: usize, rows: usize) -> (usize, usize) {
         let len = self.lib.len();
-        cursor
-            .saturating_sub(rows / 2)
-            .min(len.saturating_sub(rows))
-    }
-
-    /// 选中曲目在渲染结果里的行号（1 基），供硬件光标定位
-    fn selected_row(&self) -> Option<usize> {
-        if self.lib.is_empty() {
-            return None;
+        if len == 0 {
+            return (0, 0);
         }
-        let rows = self.list_rows();
-        let cursor = self.lib.position()?;
-        let start = self.list_start(rows, cursor);
-        let offset = cursor.checked_sub(start)?;
-        if offset >= rows {
-            return None;
-        }
-        Some(TRACK_ROW_OFFSET + offset)
+        let page_start = (cursor / PAGE_SIZE) * PAGE_SIZE;
+        let page_end = (page_start + PAGE_SIZE).min(len);
+        let page_len = page_end - page_start;
+        let visible = rows.min(page_len);
+        let offset = cursor - page_start;
+        let scroll = offset.saturating_sub(visible.saturating_sub(1));
+        let start = page_start + scroll.min(page_len - visible);
+        (start, start + visible)
     }
 
     pub fn auto_play(&self) -> bool {
@@ -471,11 +500,7 @@ impl App {
         };
         let len = self.lib.len();
         let cursor = self.lib.position().unwrap_or(0);
-        let rows = self.cfg.window.height.saturating_sub(11).clamp(3, 20);
-        let start = cursor
-            .saturating_sub(rows / 2)
-            .min(len.saturating_sub(rows));
-        let end = (start + rows).min(len);
+        let (start, end) = self.visible_range(cursor, self.list_rows());
 
         let mut list = Vec::new();
         for pos in start..end {
@@ -488,6 +513,18 @@ impl App {
                 });
             }
         }
+
+        let range = if len == 0 {
+            String::new()
+        } else {
+            format!(
+                "第 {}/{} 页 · 第 {}-{} / {len} 首",
+                self.page_index() + 1,
+                self.page_count(),
+                start + 1,
+                end
+            )
+        };
 
         View {
             app_name: self.cfg.app_name.clone(),
@@ -502,17 +539,21 @@ impl App {
             },
             title,
             artist,
-            state: self.player.state().label(),
+            state: match self.player.state() {
+                State::Playing => renderer::PlayState::Playing,
+                State::Paused => renderer::PlayState::Paused,
+                State::Stopped => renderer::PlayState::Stopped,
+            },
             position_secs: self.player.position().as_secs(),
             duration_secs: self.player.duration().as_secs(),
-            ratio: self.player.ratio(),
             volume: self.player.volume_percent(),
             shuffle: self.cfg.shuffle,
             repeat: self.cfg.repeat.label(),
             source: self.source.clone(),
             status: self.status.clone(),
+            input: self.input.clone(),
             empty_hint: len == 0,
-            range: format!("第 {}-{} / {len} 首", start + 1, end),
+            range,
             rows: list,
         }
     }
@@ -523,13 +564,16 @@ impl App {
         if frame.is_empty() {
             return;
         }
-        // 刚做完导航就把硬件光标挪到选中那一行，
-        // 下次敲命令时再回到输入行
-        match self.focus_row {
-            Some(row) => print!("{frame}\x1b[{row};1H"),
-            None => print!("{frame}"),
-        }
+        print!("{frame}");
         io::stdout().flush().ok();
+    }
+}
+
+fn state_label(state: State) -> &'static str {
+    match state {
+        State::Stopped => "未播放",
+        State::Playing => "播放中",
+        State::Paused => "已暂停",
     }
 }
 
@@ -537,5 +581,146 @@ fn describe_failure(track: &Track, err: &anyhow::Error) -> String {
     match Capability::of(&track.path).hint(&track.path) {
         Some(hint) => hint,
         None => format!("{}（{err}）", track.title),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Window;
+
+    /// 造一个一秒的静音 wav，够播放器认出来
+    fn write_wav(path: &std::path::Path) {
+        let rate: u32 = 8_000;
+        let samples = rate;
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + samples * 2).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 2).to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(samples * 2).to_le_bytes());
+        out.extend(std::iter::repeat_n(0u8, samples as usize * 2));
+        std::fs::write(path, out).unwrap();
+    }
+
+    fn app_with(name: &str, count: usize) -> App {
+        let root = std::env::temp_dir().join(format!("music_shell_test_app_{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let lib = root.join("Music");
+        std::fs::create_dir_all(&lib).unwrap();
+        for i in 0..count {
+            write_wav(&lib.join(format!("song{i:02}.wav")));
+        }
+        let cfg = Config {
+            library_path: lib,
+            playlists_dir: root.join("playlists"),
+            window: Window {
+                width: 80,
+                height: 24,
+            },
+            ..Config::default()
+        };
+        let mut app = App::new(cfg, root.join("config.json"), Player::new(0.5, true));
+        app.scan_library();
+        app
+    }
+
+    #[test]
+    fn a_page_shows_ten_tracks() {
+        let app = app_with("page", 25);
+        let view = app.view();
+        assert_eq!(view.rows.len(), PAGE_SIZE);
+        assert!(view.range.contains("第 1/3 页"), "{}", view.range);
+        assert_eq!(view.rows[0].index, 1);
+        assert_eq!(view.rows[9].index, 10);
+    }
+
+    #[test]
+    fn moving_down_selects_and_plays_the_track() {
+        let mut app = app_with("down", 25);
+        assert_eq!(app.player.state(), State::Stopped);
+        app.dispatch(Command::CursorDown);
+        assert_eq!(app.lib.position(), Some(1));
+        assert_eq!(app.player.state(), State::Playing);
+        assert!(app.status.contains("正在播放"), "{}", app.status);
+    }
+
+    #[test]
+    fn moving_up_at_the_top_does_not_restart_the_track() {
+        let mut app = app_with("up", 25);
+        app.dispatch(Command::CursorDown);
+        app.dispatch(Command::CursorUp);
+        assert_eq!(app.lib.position(), Some(0));
+        assert_eq!(app.player.state(), State::Playing);
+    }
+
+    #[test]
+    fn the_right_key_flips_to_the_next_page() {
+        let mut app = app_with("right", 25);
+        app.dispatch(Command::PageDown);
+        assert_eq!(app.lib.position(), Some(PAGE_SIZE));
+        let view = app.view();
+        assert_eq!(view.rows[0].index, PAGE_SIZE + 1);
+        assert!(view.range.contains("第 2/3 页"), "{}", view.range);
+    }
+
+    #[test]
+    fn the_left_key_flips_back() {
+        let mut app = app_with("left", 25);
+        app.dispatch(Command::PageDown);
+        app.dispatch(Command::PageUp);
+        assert_eq!(app.lib.position(), Some(0));
+        assert!(app.view().range.contains("第 1/3 页"));
+    }
+
+    #[test]
+    fn flipping_past_the_last_page_stays_in_the_list() {
+        let mut app = app_with("past", 25);
+        for _ in 0..10 {
+            app.dispatch(Command::PageDown);
+        }
+        assert_eq!(app.lib.position(), Some(20));
+        assert!(
+            app.view().range.contains("第 3/3 页"),
+            "{}",
+            app.view().range
+        );
+    }
+
+    #[test]
+    fn the_last_page_shows_the_remaining_tracks() {
+        let mut app = app_with("last", 25);
+        app.dispatch(Command::PageDown);
+        app.dispatch(Command::PageDown);
+        let view = app.view();
+        assert_eq!(view.rows.len(), 5);
+        assert_eq!(view.rows[4].index, 25);
+    }
+
+    #[test]
+    fn the_space_key_pauses_and_resumes() {
+        let mut app = app_with("space", 25);
+        app.dispatch(Command::TogglePlay);
+        assert_eq!(app.player.state(), State::Playing);
+        app.dispatch(Command::TogglePlay);
+        assert_eq!(app.player.state(), State::Paused);
+        assert_eq!(app.status, "已暂停");
+        app.dispatch(Command::TogglePlay);
+        assert_eq!(app.player.state(), State::Playing);
+    }
+
+    #[test]
+    fn the_page_never_runs_past_the_end_of_the_library() {
+        let app = app_with("short", 3);
+        let view = app.view();
+        assert_eq!(view.rows.len(), 3);
+        assert!(view.range.contains("第 1/1 页"), "{}", view.range);
     }
 }

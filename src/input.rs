@@ -14,6 +14,9 @@ pub enum Input {
     Line(String),
     /// 单个功能键
     Key(Key),
+    /// 正在输入、还没回车的那行文字。界面上把它显示在提示符后面，
+    /// 不然用户敲了半天不知道敲了什么。
+    Pending(String),
     /// 输入结束（EOF 或 Ctrl-D）
     Eof,
 }
@@ -33,6 +36,8 @@ pub enum Key {
     PageDown,
     Home,
     End,
+    /// 空格。没有正在输入命令时直接当暂停键
+    Space,
     /// 其他无法识别的转义序列，只用来清掉终端回显的内容
     Unknown,
 }
@@ -43,43 +48,99 @@ impl Input {
             Self::Line(line) => Some(Command::parse(&line)),
             Self::Key(Key::Up) => Some(Command::CursorUp),
             Self::Key(Key::Down) => Some(Command::CursorDown),
+            Self::Key(Key::Left) => Some(Command::PageUp),
+            Self::Key(Key::Right) => Some(Command::PageDown),
             Self::Key(Key::PageUp) => Some(Command::PageUp),
             Self::Key(Key::PageDown) => Some(Command::PageDown),
             Self::Key(Key::Home) => Some(Command::CursorHome),
             Self::Key(Key::End) => Some(Command::CursorEnd),
             Self::Key(Key::Enter) => Some(Command::TogglePlay),
+            Self::Key(Key::Space) => Some(Command::TogglePlay),
             Self::Key(Key::CtrlC) => Some(Command::Quit),
-            Self::Key(_) => None,
+            Self::Key(_) | Self::Pending(_) => None,
             Self::Eof => Some(Command::Quit),
         }
+    }
+}
+
+/// 输入解析器：把终端字节流变成 Input。
+///
+/// 正在输入、还没回车提交的命令存在 line 里；
+/// 没收全的转义序列存在 pending 里，等下一次读到的字节补齐。
+///
+/// 关键点：普通文字不会自己变成命令。终端一个按键一次 read，
+/// 如果每读到一个字节就把行交出去，"pl work" 会被拆成 "pl" 和 "work"
+/// 分别执行，带空格的命令根本没法输入。
+#[derive(Debug, Default)]
+pub struct Parser {
+    line: Vec<u8>,
+    pending: Vec<u8>,
+}
+
+impl Parser {
+    /// 喂进新读到的字节，返回这次能确定的输入
+    pub fn feed(&mut self, data: &[u8]) -> Vec<Input> {
+        let mut merged = Vec::new();
+        if !self.pending.is_empty() {
+            merged.extend_from_slice(&self.pending);
+            self.pending.clear();
+        }
+        merged.extend_from_slice(data);
+
+        let before = self.line_text();
+        let mut parsed = Vec::new();
+        parse_bytes(&merged, &mut self.line, &mut self.pending, &mut parsed);
+
+        let mut out = Vec::new();
+        let after = self.line_text();
+        if after != before {
+            out.push(Input::Pending(after));
+        }
+        out.extend(parsed);
+        out
+    }
+
+    /// 输入结束，把还没提交的命令交出去
+    pub fn finish(&mut self) -> Vec<Input> {
+        let mut out = Vec::new();
+        flush_line(&mut self.line, &mut out);
+        out
+    }
+
+    fn line_text(&self) -> String {
+        String::from_utf8_lossy(&self.line).into_owned()
     }
 }
 
 /// 把一段终端输入解析成若干个 Input。
 /// 方向键之类不发换行的键必须在这里被识别出来，否则会被当成文本。
 pub fn parse_stream(data: &[u8]) -> Vec<Input> {
-    let mut out = Vec::new();
-    let mut line = Vec::new();
+    let mut parser = Parser::default();
+    let mut out = parser.feed(data);
+    out.extend(parser.finish());
+    out
+}
+
+fn parse_bytes(data: &[u8], line: &mut Vec<u8>, pending: &mut Vec<u8>, out: &mut Vec<Input>) {
     let mut i = 0;
 
     while i < data.len() {
         match data[i] {
             b'\n' => {
                 // 回车总是提交一行，哪怕内容为空（空行 = 播放/暂停）
-                let taken = std::mem::take(&mut line);
-                out.push(Input::Line(String::from_utf8_lossy(&taken).into_owned()));
+                submit_line(line, out);
                 i += 1;
             }
             b'\r' => {
                 i += 1;
             }
             0x03 => {
-                flush_line(&mut line, &mut out);
+                flush_line(line, out);
                 out.push(Input::Key(Key::CtrlC));
                 i += 1;
             }
             0x09 => {
-                flush_line(&mut line, &mut out);
+                flush_line(line, out);
                 out.push(Input::Key(Key::Tab));
                 i += 1;
             }
@@ -89,37 +150,55 @@ pub fn parse_stream(data: &[u8]) -> Vec<Input> {
                 }
                 i += 1;
             }
-            0x1b => match parse_escape(&data[i..]) {
-                Escaped::Key(key, len) => {
-                    flush_line(&mut line, &mut out);
-                    out.push(Input::Key(key));
-                    i += len;
+            b' ' => {
+                // 空格有两种身份：手头没有命令时是暂停键，
+                // 正在输入 "pl work" 这种带空格命令时就是普通字符。
+                if line.iter().all(u8::is_ascii_whitespace) {
+                    line.clear();
+                    out.push(Input::Key(Key::Space));
+                } else {
+                    line.push(b' ');
                 }
-                Escaped::Incomplete => {
-                    // 序列还没收全，剩下的都当成普通字符处理
-                    line.push(data[i]);
-                    i += 1;
+                i += 1;
+            }
+            0x1b => {
+                pending.clear();
+                pending.extend_from_slice(&data[i..]);
+                match parse_escape(pending) {
+                    Escaped::Key(key, len) => {
+                        pending.clear();
+                        flush_line(line, out);
+                        out.push(Input::Key(key));
+                        i += len;
+                    }
+                    Escaped::Incomplete => {
+                        // 序列还没收全，剩下的等下一次读
+                        return;
+                    }
+                    Escaped::NotEscape => {
+                        pending.clear();
+                        flush_line(line, out);
+                        out.push(Input::Key(Key::Esc));
+                        i += 1;
+                    }
                 }
-                Escaped::NotEscape => {
-                    flush_line(&mut line, &mut out);
-                    out.push(Input::Key(Key::Esc));
-                    i += 1;
-                }
-            },
+            }
             _ => {
                 line.push(data[i]);
                 i += 1;
+                // 单键命令敲一下就生效，不用等回车。
+                // 数字和带参数的命令攒到回车再说。
+                let instant = crate::command::is_instant(&String::from_utf8_lossy(line));
+                if instant {
+                    submit_line(line, out);
+                }
             }
         }
     }
-    flush_line(&mut line, &mut out);
-    out
 }
 
-fn flush_line(line: &mut Vec<u8>, out: &mut Vec<Input>) {
-    if line.is_empty() {
-        return;
-    }
+/// 提交一行命令，空行也算（空行 = 播放/暂停）
+fn submit_line(line: &mut Vec<u8>, out: &mut Vec<Input>) {
     match String::from_utf8(std::mem::take(line)) {
         Ok(text) => out.push(Input::Line(text)),
         Err(err) => {
@@ -127,6 +206,14 @@ fn flush_line(line: &mut Vec<u8>, out: &mut Vec<Input>) {
             out.push(Input::Line(text));
         }
     }
+}
+
+/// 提交一行命令，空行就什么都不交
+fn flush_line(line: &mut Vec<u8>, out: &mut Vec<Input>) {
+    if line.is_empty() {
+        return;
+    }
+    submit_line(line, out);
 }
 
 enum Escaped {
@@ -213,13 +300,13 @@ fn reader_loop(tx: Sender<Input>) {
     use io::Read;
     let stdin = io::stdin();
     let mut locked = stdin.lock();
-    let mut pending: Vec<u8> = Vec::new();
+    let mut parser = Parser::default();
     let mut buf = [0u8; 1024];
 
     loop {
         match locked.by_ref().read(&mut buf) {
             Ok(0) => {
-                for input in parse_stream(&pending) {
+                for input in parser.finish() {
                     if tx.send(input).is_err() {
                         return;
                     }
@@ -228,11 +315,8 @@ fn reader_loop(tx: Sender<Input>) {
                 return;
             }
             Ok(n) => {
-                pending.extend_from_slice(&buf[..n]);
-                // 转义序列可能被拆在两次 read 之间，先取出能取的部分，
-                // 剩下的不完整前缀留在缓冲区里等下一次 read
-                let drained = drain_complete(&mut pending);
-                for input in drained {
+                // 转义序列可能被拆在两次 read 之间，解析器自己会留着等补齐
+                for input in parser.feed(&buf[..n]) {
                     if tx.send(input).is_err() {
                         return;
                     }
@@ -244,29 +328,6 @@ fn reader_loop(tx: Sender<Input>) {
             }
         }
     }
-}
-
-/// 解析缓冲区里已经完整的部分，末尾残缺的转义前缀保持不动
-fn drain_complete(pending: &mut Vec<u8>) -> Vec<Input> {
-    let keep = trailing_incomplete(pending);
-    let ready = pending.len() - keep;
-    let rest = pending.split_off(ready);
-    let out = parse_stream(pending);
-    *pending = rest;
-    out
-}
-
-fn trailing_incomplete(data: &[u8]) -> usize {
-    for start in (0..data.len()).rev() {
-        if data[start] != 0x1b {
-            continue;
-        }
-        return match parse_escape(&data[start..]) {
-            Escaped::Incomplete => data.len() - start,
-            _ => 0,
-        };
-    }
-    0
 }
 
 /// termios 相关代码只在 Unix 上存在，Windows 用不到。
@@ -396,6 +457,28 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_space_is_the_pause_key() {
+        assert_eq!(keys(b" "), vec![Key::Space]);
+        assert_eq!(lines(b" "), Vec::<String>::new(), "空格不该变成命令行文本");
+    }
+
+    #[test]
+    fn a_space_inside_a_command_stays_a_character() {
+        assert_eq!(keys(b"pl work\n"), Vec::<Key>::new());
+        assert_eq!(lines(b"pl work\n"), vec!["pl work".to_string()]);
+    }
+
+    #[test]
+    fn space_and_arrows_map_to_commands() {
+        assert_eq!(
+            Input::Key(Key::Space).to_command(),
+            Some(Command::TogglePlay)
+        );
+        assert_eq!(Input::Key(Key::Left).to_command(), Some(Command::PageUp));
+        assert_eq!(Input::Key(Key::Right).to_command(), Some(Command::PageDown));
+    }
+
+    #[test]
     fn three_arrows_produce_three_keys() {
         assert_eq!(
             keys(b"\x1b[B\x1b[B\x1b[B"),
@@ -405,27 +488,75 @@ mod tests {
 
     #[test]
     fn arrow_bytes_split_across_reads_reassemble() {
-        let mut pending: Vec<u8> = Vec::new();
+        let mut parser = Parser::default();
         let mut all = Vec::new();
         for chunk in [&b"\x1b"[..], b"[", b"B"] {
-            pending.extend_from_slice(chunk);
-            for input in drain_complete(&mut pending) {
+            for input in parser.feed(chunk) {
                 if let Input::Key(k) = input {
                     all.push(k);
                 }
             }
         }
         assert_eq!(all, vec![Key::Down]);
-        assert!(pending.is_empty(), "完整序列不该有残留");
     }
 
     #[test]
-    fn an_incomplete_sequence_stays_in_the_buffer() {
-        let mut pending: Vec<u8> = Vec::new();
-        pending.extend_from_slice(b"ab\x1b[");
-        let got = drain_complete(&mut pending);
-        assert_eq!(got, vec![Input::Line("ab".into())]);
-        assert_eq!(pending, b"\x1b[".to_vec());
+    fn an_incomplete_sequence_waits_for_the_next_read() {
+        let mut parser = Parser::default();
+        assert_eq!(
+            parser.feed(b"ab\x1b["),
+            vec![Input::Pending("ab".into())],
+            "没收全的序列不该产生按键"
+        );
+        let got = parser.feed(b"B");
+        assert_eq!(
+            got,
+            vec![
+                Input::Pending(String::new()),
+                Input::Line("ab".into()),
+                Input::Key(Key::Down)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_partial_command_waits_for_enter() {
+        // 终端一个按键一次 read：文字不能自己变成命令，
+        // 否则 "pl work" 会被拆成两条命令分别执行。
+        let mut parser = Parser::default();
+        assert_eq!(parser.feed(b"pl"), vec![Input::Pending("pl".into())]);
+        assert_eq!(parser.feed(b" "), vec![Input::Pending("pl ".into())]);
+        assert_eq!(parser.feed(b"work"), vec![Input::Pending("pl work".into())]);
+        assert_eq!(
+            parser.feed(b"\n"),
+            vec![Input::Pending(String::new()), Input::Line("pl work".into())]
+        );
+    }
+
+    #[test]
+    fn a_number_only_becomes_a_command_after_enter() {
+        let mut parser = Parser::default();
+        assert_eq!(parser.feed(b"5"), vec![Input::Pending("5".into())]);
+        assert_eq!(
+            parser.feed(b"\n"),
+            vec![Input::Pending(String::new()), Input::Line("5".into())]
+        );
+    }
+
+    #[test]
+    fn a_space_stays_a_pause_key_while_typing() {
+        let mut parser = Parser::default();
+        assert_eq!(parser.feed(b" "), vec![Input::Key(Key::Space)]);
+        assert_eq!(parser.feed(b"pl"), vec![Input::Pending("pl".into())]);
+        assert_eq!(
+            parser.feed(b" "),
+            vec![Input::Pending("pl ".into())],
+            "命令里的空格是普通字符"
+        );
+        assert_eq!(
+            parser.feed(b"work\n"),
+            vec![Input::Pending(String::new()), Input::Line("pl work".into())]
+        );
     }
 
     #[test]
@@ -457,10 +588,11 @@ mod tests {
                 Input::Line("def".into())
             ]
         );
-        assert_eq!(
-            parse_stream(b"\x1b[Bn\n"),
-            vec![Input::Key(Key::Down), Input::Line("n".into())]
-        );
+    }
+
+    #[test]
+    fn a_single_key_command_fires_without_enter() {
+        assert_eq!(parse_stream(b"n"), vec![Input::Line("n".into())]);
     }
 
     #[test]
@@ -475,7 +607,7 @@ mod tests {
 
     #[test]
     fn carriage_return_does_not_create_extra_lines() {
-        assert_eq!(lines(b"q\r\n"), vec!["q".to_string()]);
+        assert_eq!(lines(b"zz\r\n"), vec!["zz".to_string()]);
     }
 
     #[test]
