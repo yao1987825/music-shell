@@ -203,6 +203,33 @@ impl App {
         }
     }
 
+    /// 启动参数 `--playlist` 的入口：歌单文件在就加载；
+    /// 还不存在（或者是空的）就退回全库并提示怎么收歌 ——
+    /// 首次 `music my` 不该报错退出，也不该是个"没歌可放"的死界面。
+    /// 文件存在但损坏仍返回 false（启动失败，别悄悄覆盖用户数据）。
+    pub fn open_playlist_or_empty(&mut self, name: &str) -> bool {
+        if Playlist::file_in(&self.cfg.playlists_dir, name).exists() {
+            if !self.load_playlist(name) {
+                return false;
+            }
+            if self.lib_len() > 0 {
+                return true;
+            }
+        }
+        // 没有歌单 / 空歌单：先开全库，状态栏教用户怎么往歌单里收
+        self.scan_library();
+        self.status = format!(
+            "歌单《{name}》还没有歌: 下面是全库, 按 Alt+A 收当前这首(收满后 music my 专听这个歌单)"
+        );
+        true
+    }
+
+    /// 曲库当前有多少首（空库时启动逻辑要跳过自动播放，
+    /// 免得把"歌单还没有歌"的提示冲掉）
+    pub fn lib_len(&self) -> usize {
+        self.lib.len()
+    }
+
     pub fn save_playlist(&mut self, name: Option<&str>) -> bool {
         let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) else {
             let known = Playlist::list(&self.cfg.playlists_dir);
@@ -248,6 +275,46 @@ impl App {
         self.cfg.recent_playlists.retain(|n| n != name);
         self.cfg.recent_playlists.insert(0, name.to_string());
         self.cfg.recent_playlists.truncate(10);
+    }
+
+    /// Alt+A / fav：把当前播放的这首歌追加进自定义歌单（默认《我的》）。
+    /// 按 path 去重；歌单文件不存在就新建，已损坏则报错、绝不覆盖。
+    pub fn add_favorite(&mut self) {
+        let name = self.cfg.favorite_playlist.clone();
+        let Some(track) = self.lib.current().cloned() else {
+            self.status = "当前没有在播的歌".into();
+            return;
+        };
+        let file = Playlist::file_in(&self.cfg.playlists_dir, &name);
+        let mut pl = if file.exists() {
+            match Playlist::load(&self.cfg.playlists_dir, &name) {
+                Ok(pl) => pl,
+                Err(err) => {
+                    self.status = format!("{err}");
+                    return;
+                }
+            }
+        } else {
+            Playlist {
+                name: name.clone(),
+                tracks: Vec::new(),
+            }
+        };
+        if !pl.add_track(track.clone()) {
+            self.status = format!("《{name}》里已经有《{}》了", track.title);
+            return;
+        }
+        match pl.save(&self.cfg.playlists_dir) {
+            Ok(_) => {
+                self.status = format!(
+                    "已加入《{name}》(第 {} 首): {}",
+                    pl.tracks.len(),
+                    track.title
+                );
+                self.remember_playlist(&name);
+            }
+            Err(err) => self.status = format!("保存《{name}》失败: {err}"),
+        }
     }
 
     pub fn reload_config(&mut self) {
@@ -359,6 +426,7 @@ impl App {
             Command::SavePlaylist(name) => {
                 self.save_playlist(Some(&name));
             }
+            Command::AddFavorite => self.add_favorite(),
             Command::Help => self.status = renderer::help_text(self.cfg.theme),
             Command::Unknown(word) => {
                 self.status = format!("未知命令 `{word}`，输入 ? 看帮助");
@@ -722,5 +790,57 @@ mod tests {
         let view = app.view();
         assert_eq!(view.rows.len(), 3);
         assert!(view.range.contains("第 1/1 页"), "{}", view.range);
+    }
+
+    #[test]
+    fn opening_a_missing_playlist_falls_back_to_the_library() {
+        let mut app = app_with("missing_pl", 3);
+        assert!(app.open_playlist_or_empty("我的"));
+        assert_eq!(app.lib_len(), 3, "歌单没歌时应该退回全库, 不是空界面");
+        assert!(app.status.contains("还没有歌"), "{}", app.status);
+    }
+
+    #[test]
+    fn an_empty_playlist_also_falls_back_to_the_library() {
+        let mut app = app_with("empty_pl", 3);
+        let pl = Playlist {
+            name: "我的".into(),
+            tracks: Vec::new(),
+        };
+        pl.save(&app.cfg.playlists_dir).unwrap();
+        assert!(app.open_playlist_or_empty("我的"));
+        assert_eq!(app.lib_len(), 3);
+        assert!(app.status.contains("还没有歌"), "{}", app.status);
+    }
+
+    #[test]
+    fn opening_a_broken_playlist_fails_without_overwriting_it() {
+        let mut app = app_with("broken_pl", 3);
+        std::fs::create_dir_all(&app.cfg.playlists_dir).unwrap();
+        let file = Playlist::file_in(&app.cfg.playlists_dir, "坏歌单");
+        std::fs::write(&file, b"{ not json").unwrap();
+        assert!(!app.open_playlist_or_empty("坏歌单"));
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"{ not json",
+            "坏歌单不能被悄悄覆盖"
+        );
+    }
+
+    #[test]
+    fn alt_a_adds_the_playing_track_to_the_favorite_playlist() {
+        let mut app = app_with("fav", 3);
+        app.dispatch(Command::TogglePlay);
+        let title = app.lib.current().unwrap().title.clone();
+        app.dispatch(Command::AddFavorite);
+        assert!(app.status.contains("已加入"), "{}", app.status);
+        let pl = Playlist::load(&app.cfg.playlists_dir, "我的").unwrap();
+        assert_eq!(pl.tracks.len(), 1);
+        assert_eq!(pl.tracks[0].title, title);
+
+        app.dispatch(Command::AddFavorite);
+        assert!(app.status.contains("已经有"), "{}", app.status);
+        let pl = Playlist::load(&app.cfg.playlists_dir, "我的").unwrap();
+        assert_eq!(pl.tracks.len(), 1, "同一首歌不该重复进歌单");
     }
 }

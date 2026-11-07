@@ -152,14 +152,15 @@ fn run() -> Result<()> {
     let mut app = App::new(cfg, args.config, Player::new(volume, args.no_audio));
 
     if let Some(name) = args.playlist {
-        if !app.load_playlist(&name) {
+        if !app.open_playlist_or_empty(&name) {
             bail!("播放列表 {name} 加载失败");
         }
     } else {
         app.scan_library();
     }
 
-    if app.auto_play() {
+    // 空库不自动播放: 免得 play_cursor 把"歌单还没有歌"的提示冲成"播放列表为空"
+    if app.auto_play() && app.lib_len() > 0 {
         app.play_cursor();
     }
 

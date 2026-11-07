@@ -249,6 +249,16 @@ impl Playlist {
         names.sort();
         names
     }
+
+    /// 追加一首歌到歌单末尾，按 path 去重。
+    /// 返回是否真的加进去了（已在列则返回 false，不重复写）。
+    pub fn add_track(&mut self, track: Track) -> bool {
+        if self.tracks.iter().any(|t| t.path == track.path) {
+            return false;
+        }
+        self.tracks.push(track);
+        true
+    }
 }
 
 #[derive(Debug, Default)]
@@ -548,6 +558,19 @@ mod tests {
     fn missing_playlist_reports_an_error() {
         let dir = std::env::temp_dir().join("music_shell_test_absent");
         assert!(Playlist::load(&dir, "nothing").is_err());
+    }
+
+    #[test]
+    fn add_track_appends_once_by_path() {
+        let mut pl = Playlist {
+            name: "我的".into(),
+            tracks: vec![track("a")],
+        };
+        assert!(pl.add_track(track("b")), "新歌应该加进去");
+        assert_eq!(pl.tracks.len(), 2);
+        assert!(!pl.add_track(track("a")), "同一首歌不该重复加");
+        assert!(!pl.add_track(track("b")));
+        assert_eq!(pl.tracks.len(), 2);
     }
 }
 

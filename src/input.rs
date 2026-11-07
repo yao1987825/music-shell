@@ -38,6 +38,9 @@ pub enum Key {
     End,
     /// 空格。没有正在输入命令时直接当暂停键
     Space,
+    /// Alt+字符。终端把 Alt+X 发成 ESC X（如 Alt+A = 两字节 ESC a）。
+    /// 只有和 ESC 同一次 read 到达才算；跨 read 的 ESC+字符仍按 Esc 处理。
+    Alt(char),
     /// 其他无法识别的转义序列，只用来清掉终端回显的内容
     Unknown,
 }
@@ -57,6 +60,7 @@ impl Input {
             Self::Key(Key::Enter) => Some(Command::TogglePlay),
             Self::Key(Key::Space) => Some(Command::TogglePlay),
             Self::Key(Key::CtrlC) => Some(Command::Quit),
+            Self::Key(Key::Alt(c)) if c == 'a' || c == 'A' => Some(Command::AddFavorite),
             Self::Key(_) | Self::Pending(_) => None,
             Self::Eof => Some(Command::Quit),
         }
@@ -81,7 +85,10 @@ impl Parser {
     /// 喂进新读到的字节，返回这次能确定的输入
     pub fn feed(&mut self, data: &[u8]) -> Vec<Input> {
         let mut merged = Vec::new();
-        if !self.pending.is_empty() {
+        // 上一次没收全的转义序列。carried 表示这次合并里开头的 ESC
+        // 是上一次 read 留下的（跨 read 的 ESC+字符不当成 Alt）
+        let carried = !self.pending.is_empty();
+        if carried {
             merged.extend_from_slice(&self.pending);
             self.pending.clear();
         }
@@ -89,7 +96,13 @@ impl Parser {
 
         let before = self.line_text();
         let mut parsed = Vec::new();
-        parse_bytes(&merged, &mut self.line, &mut self.pending, &mut parsed);
+        parse_bytes(
+            &merged,
+            &mut self.line,
+            &mut self.pending,
+            &mut parsed,
+            carried,
+        );
 
         let mut out = Vec::new();
         let after = self.line_text();
@@ -121,7 +134,13 @@ pub fn parse_stream(data: &[u8]) -> Vec<Input> {
     out
 }
 
-fn parse_bytes(data: &[u8], line: &mut Vec<u8>, pending: &mut Vec<u8>, out: &mut Vec<Input>) {
+fn parse_bytes(
+    data: &[u8],
+    line: &mut Vec<u8>,
+    pending: &mut Vec<u8>,
+    out: &mut Vec<Input>,
+    carried: bool,
+) {
     let mut i = 0;
 
     while i < data.len() {
@@ -162,9 +181,11 @@ fn parse_bytes(data: &[u8], line: &mut Vec<u8>, pending: &mut Vec<u8>, out: &mut
                 i += 1;
             }
             0x1b => {
+                // 只有 data[0] 的 ESC 才可能是上一次 read 留下的
+                let esc_carried = carried && i == 0;
                 pending.clear();
                 pending.extend_from_slice(&data[i..]);
-                match parse_escape(pending) {
+                match parse_escape(pending, esc_carried) {
                     Escaped::Key(key, len) => {
                         pending.clear();
                         flush_line(line, out);
@@ -223,7 +244,10 @@ enum Escaped {
 }
 
 /// 解析 CSI / SS3 序列，返回键和它占用的字节数
-fn parse_escape(data: &[u8]) -> Escaped {
+///
+/// `carried` = 这次的 ESC 是上一次 read 留下的：跨 read 的 ESC+字符
+/// 是用户先按 Esc 再敲的字，不能吞成 Alt。
+fn parse_escape(data: &[u8], carried: bool) -> Escaped {
     if data.len() < 2 {
         return Escaped::Incomplete;
     }
@@ -244,6 +268,9 @@ fn parse_escape(data: &[u8]) -> Escaped {
             };
             Escaped::Key(key, 3)
         }
+        // Alt+X 在终端里就是 ESC X（如 Alt+A = ESC a）。可打印 ASCII 才认，
+        // 控制字符仍按 NotEscape 走，免得把残缺序列吞成 Alt。
+        c if !carried && c.is_ascii_graphic() => Escaped::Key(Key::Alt(c as char), 2),
         _ => Escaped::NotEscape,
     }
 }
@@ -498,6 +525,43 @@ mod tests {
             }
         }
         assert_eq!(all, vec![Key::Down]);
+    }
+
+    #[test]
+    fn alt_a_in_one_read_is_add_favorite() {
+        assert_eq!(keys(b"\x1ba"), vec![Key::Alt('a')]);
+        assert_eq!(keys(b"\x1bA"), vec![Key::Alt('A')]);
+        assert_eq!(
+            Input::Key(Key::Alt('a')).to_command(),
+            Some(Command::AddFavorite)
+        );
+        assert_eq!(
+            Input::Key(Key::Alt('A')).to_command(),
+            Some(Command::AddFavorite)
+        );
+    }
+
+    #[test]
+    fn other_alt_letters_parse_but_do_nothing() {
+        assert_eq!(keys(b"\x1bq"), vec![Key::Alt('q')]);
+        assert_eq!(Input::Key(Key::Alt('q')).to_command(), None);
+        assert_eq!(Input::Key(Key::Alt('x')).to_command(), None);
+    }
+
+    #[test]
+    fn esc_then_letter_across_reads_stays_esc_plus_letter() {
+        let mut parser = Parser::default();
+        assert_eq!(
+            parser.feed(b"\x1b"),
+            Vec::<Input>::new(),
+            "裸 ESC 先攒着等下一个字节"
+        );
+        let got = parser.feed(b"l");
+        assert_eq!(
+            got,
+            vec![Input::Key(Key::Esc), Input::Line("l".into())],
+            "跨 read 的 ESC+字母仍是 Esc+敲字，不能吞成 Alt（否则 Esc 后按 l 重扫会失效）"
+        );
     }
 
     #[test]

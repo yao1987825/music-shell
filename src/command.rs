@@ -21,6 +21,8 @@ pub enum Command {
     ListPlaylists,
     LoadPlaylist(String),
     SavePlaylist(String),
+    /// 把当前播放的这首歌追加进自定义歌单（Alt+A / fav）
+    AddFavorite,
     Help,
     Unknown(String),
 }
@@ -64,6 +66,7 @@ impl Command {
                 Some(name) if !name.is_empty() => Self::SavePlaylist(name),
                 _ => Self::ListPlaylists,
             },
+            "fav" | "favorite" => Self::AddFavorite,
             "?" | "h" | "help" => Self::Help,
             _ => Self::Unknown(verb),
         }
@@ -151,6 +154,13 @@ mod tests {
         );
         assert_eq!(Command::parse("pl"), Command::ListPlaylists);
         assert_eq!(Command::parse("sv"), Command::ListPlaylists);
+    }
+
+    #[test]
+    fn fav_adds_the_current_track_to_the_playlist() {
+        assert_eq!(Command::parse("fav"), Command::AddFavorite);
+        assert_eq!(Command::parse(" FAVORITE "), Command::AddFavorite);
+        assert!(is_instant("fav"), "fav 敲一下就生效");
     }
 
     #[test]

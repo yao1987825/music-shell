@@ -118,6 +118,8 @@ pub struct Config {
     pub shuffle: bool,
     pub repeat: Repeat,
     pub recent_playlists: Vec<String>,
+    /// Alt+A 收歌进的自定义歌单名
+    pub favorite_playlist: String,
     pub window: Window,
 }
 
@@ -136,6 +138,7 @@ impl Default for Config {
             shuffle: false,
             repeat: Repeat::Off,
             recent_playlists: Vec::new(),
+            favorite_playlist: "我的".to_string(),
             window: Window::default(),
         }
     }
