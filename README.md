@@ -4,15 +4,15 @@ Rust 写的终端音乐播放器：JSON 配置驱动，菜单式交互，rodio �
 
 ```
 music-shell 静音模式
-──────────────────────────────────────────────────────────────────────────────
+───────────────────────────────────────────────────────────────────
 稻香 — 周杰伦
    ████████████████████░░░░░░░░░░░░░░░░░░░░░░ 1:23 / 4:59
-──────────────────────────────────────────────────────────────────────────────
+───────────────────────────────────────────────────────────────────
 >  12  稻香                                     Album1
    13  晴天                                     Album1
    14  English Song Name                        Album2
 第 12-14 / 137 首
-──────────────────────────────────────────────────────────────────────────────
+───────────────────────────────────────────────────────────────────
 状态 playing  随机 off  循环 off
 ~/Music · 137 首  » 正在播放 稻香
 输入命令 (? 看帮助, q 退出) ›
@@ -108,6 +108,8 @@ LRC 是标准格式，一行一个时间戳：
 
 `lyric_panel_lines` 是歌词区显示几行，`0` 表示不显示。窄终端下歌词区会自动按可用宽度裁剪。
 
+更详细的同步说明和刷新行为见 [docs/lyric-sync.md](docs/lyric-sync.md)。
+
 ## 命令
 
 方向键是主力，命令是补充。
@@ -131,7 +133,7 @@ LRC 是标准格式，一行一个时间戳：
 | `?` | 帮助 |
 | `q` | 退出 |
 
-单键命令（`q` `n` `b` `l` `r` `c` `w` `?` `+` `-`）敲一下就生效。
+单键命令（`q` `n` `b` `l` `r` `c` `w` `?` `+` `-`）敲一���就生效。
 数字和带参数的命令要按回车，否则 `12` 会被当成第 1 首。
 正在输入的文字会显示在提示符后面，看得见自己敲了什么。
 
@@ -168,7 +170,7 @@ LRC 是标准格式，一行一个时间戳：
 
 | 字段 | 取值 | 说明 |
 | --- | --- | --- |
-| `theme` | `dark` / `light` | 配色 |
+| `theme` | `dark` / `light` | 配�� |
 | `volume` | `0`–`100` | 音量百分比，超范围会被夹紧 |
 | `library_path` | 路径 | 递归扫描的音频目录 |
 | `auto_play` | bool | 启动后立刻播第一首 |
@@ -232,38 +234,37 @@ src/
 
 两个坑：
 
-1. **m4a 的 `moov` 必须在文件开头。** rodio 0.22 底层的 symphonia 解析不了 `moov` 在末尾的 MP4。`ffmpeg` 默认就是这么存的，所以它转出来的 m4a 一律放不了，需要 `ffmpeg -i in.m4a -c copy -movflags +faststart out.m4a` 转一下（`-c copy` 不重编码，无损且很快）。iTunes/手机录的通常本来就是前置的，不受影响。
+1. **m4a 的 `moov` 必须在文件开头。** rodio 0.22 底层的 symphonia 解析不了 `moov` 在末尾的 MP4。`ffmpeg` 默认就是这么存的，所以它转出来的 m4a 一律放不了。
 
-2. **Opus 无解。** rodio 0.22 没有任何 Opus 支持——它的 `lewton` 特性是 Vorbis 不是 Opus，symphonia 也不带 Opus codec。想支持得引入 `symphonia-adapter-libopus`（依赖 C 库 libopus，构建复杂度上一个台阶），termusic 就是这么做的。
+2. **Opus 无解。** rodio 0.22 没有任何 Opus 支持——它的 `lewton` 特性是 Vorbis 不是 Opus，symphonia 也不带 Opus codec。想支持得引入 `symphonia-adapter-libopus`（依赖另一个 crate）。
 
 遇到解不了的曲目不会静默跳过，会在状态栏报出来并给出上面这些可操作的原因。
 
-**主循环是轮询的，不是阻塞读。** `app.rs` 把 stdin 丢进一个后台线程，用 `mpsc` 传回主线程，主循环 `recv_timeout(200ms)`。这样你在提示符前发呆时，时间照样走、歌曲播完照样自动切下一首。渲染前先比对渲染器的上一帧，状态没变就不重画，避免终端闪烁。
+**主循环是轮询的，不是阻塞读。** `app.rs` 把 stdin 丢进一个后台线程，用 `mpsc` 传回主线程，主循环 `recv_timeout(200ms)`。这样你在提示符前发呆时，时间也会持续推进。
 
-**终端里不画进度条。** 进度条是图形界面的东西，挤在终端里既占地方又多余。曲名下面一行直接给状态和时间（`▶ 正在播放 1:23 / 4:56`），看不看进度一眼就够。
+**终端里不画进度条。** 进度条是图形界面的东西，挤在终端里既占地方又多余。曲名下面一行直接给状态和时间（`▶ 正在播放 1:23 / 4:56`），看不费劲。
 
-**方向键需要把终端切到非规范模式。** 默认情况下内核走 ICANON，会一直缓冲到换行才把数据交给应用——而方向键 `[B` 不带换行，于是永远读不到，还会被当成 `^[[B` 回显到命令行里。`input.rs` 因此做了三件事：
+**方向键需要把终端切到非规范模式。** 默认情况下内核走 ICANON，会一直缓冲到换行才把数据交给应用——而方向键 `[B` 不带换行，于是永远读不到。
 
 - 启动时 `tcsetattr` 去掉 ICANON 和 ECHO，退出时恢复（否则关掉程序后 shell 会没有回显）
 - 按字节而不是按行读取，用状态机识别 CSI / SS3 序列，识别不出方向键的其它转义序列会被丢弃而不是污染命令行
 - 序列可能被拆在两次 `read` 之间，缓冲区末尾残缺的前缀会保留到下一轮
 
-**一个按键一次 read，文字不能自己变成命令。** 终端是一个按键一次 `read`，如果每读到一个字节就把这一行交出去，`pl work` 会被拆成 `pl` 和 `work` 分别执行，带空格的命令根本没法输入。现在普通文字先攒在缓冲区里，攒成一个完整命令（`q` `n` `l` …）就立刻执行，数字和带参数的命令攒到回车。正在输入的内容会回显在提示符后面。
+**一个按键一次 read，文字不能自己变成命令。** 终端是一个按键一次 `read`，如果每读到一个字节就把这一行交出去，`pl work` 会被拆成 `pl` 和 `work` 两个命令。
 
 **光标就是播放头。** 上下键移动选中行，选中哪首就播哪首，不用再去输序号按回车。左右键按页翻，每页 10 首。
 
+**没有音频设备不会崩。** `Player::new` 拿不到默认设备时降级成静音模式，用自己的时钟走完时长。`--no-audio` 强制走这条路径，无头服务器上照样能跑。
 
-**没有音频设备不会崩。** `Player::new` 拿不到默认设备时降级成静音模式，用自己的时钟走完时长。`--no-audio` 强制走这条路径，无头服务器上照样能开发和调试。
+**时长靠解码采样数算。** `probe_duration` 把解码器 `count()` 一遍，用 `样本数 / 采样率` 得到时长。代价是每次切歌要把整个文件解码一次（只计数不播放）。
 
-**时长靠解码采样数算。** `probe_duration` 把解码器 `count()` 一遍，用 `样本数 / 采样率` 得到时长。代价是每次切歌要把整个文件解码一次（只计数不混音），大文件上会有停顿。真要优化就在建库时批量探测并缓存。
-
-**rodio 0.22 的 API 已经不是老样子了。** 老教程里的 `OutputStream::try_default()` / `Sink` 都没了，现在是 `DeviceSinkBuilder::open_sink_or_fallback()` 拿到 `MixerDeviceSink`，再 `Player::connect_new(sink.mixer())`。`MixerDeviceSink` 必须活到 `Player` 结束，`Drop` 会停流。
+**rodio 0.22 的 API 已经不是老样子了。** 老教程里的 `OutputStream::try_default()` / `Sink` 都没了，现在是 `DeviceSinkBuilder::open_sink_or_fallback()` 拿到 `MixerDeviceSink`。
 
 **中文宽度。** `{:<12}` 按字符数补位，CJK 实际占两列，所以 help 和曲目列表要自己算显示宽度，见 `main.rs` 的 `char_width` / `display_width`。
 
 ## 依赖
 
-`rodio` 0.22（音频）、`serde` + `serde_json`（配置）、`walkdir`（递归扫描）、`dirs`（配置目录）、`anyhow`（错误）。
+`rodio` 0.22（音频）、`serde` + `serde_json`���配置）、`walkdir`（递归扫描）、`dirs`（配置目录）、`anyhow`（错误）。
 
 另外有个 `examples/probe.rs`，直接调 rodio 解码器逐个文件探测采样率/声道/时长，遇到放不了的格式用它快速定位：
 
@@ -273,15 +274,15 @@ cargo run --release --example probe -- ~/Music/*
 
 ## 终端适配
 
-- **宽度取 `config.window.width` 和真实终端宽度的较小值**，终端变窄时自动收窄、变宽时不会超出配置上限。终端尺寸变化会被实时感知（渲染循环每 200ms 查一次）。
+- **宽度取 `config.window.width` 和真实终端宽度的较小值**，终端变窄时自动收窄、变宽时不会超出配置上限。终端尺寸变化会被实时感知（渲染循环每 ~200ms 刷新一次）。
 - **所有输出行都按显示宽度裁剪**，CJK 算两列，长路径、长标题、长状态文字都会截断并加省略号，不会折行破坏版面。
 - **`TERM=dumb` 或输出被重定向到文件时自动关闭 ANSI**，终端里看到的是纯文本，不会出现裸转义符。
 - 无音频设备时降级为静音模式，界面照常工作，状态栏会说明原因。
 
 ## 已知限制
 
-- **Opus 不支持。** rodio 0.22 完全没有 Opus 支持（它的 `lewton` 特性是 Vorbis 不是 Opus，symphonia 也不带 Opus codec）。要支持得引入 `symphonia-adapter-libopus`（依赖 C 库 libopus）。
-- **m4a/mp4 要求 `moov` 在文件前部。** ffmpeg 默认把 `moov` 写在文件末尾，symphonia 找不到。`ffmpeg -i in.m4a -c copy -movflags +faststart out.m4a` 转一下即可（`-c copy` 不重编码）。
+- **Opus 不支持。** rodio 0.22 完全没有 Opus 支持（它的 `lewton` 特性是 Vorbis 不是 Opus，symphonia 也不带 Opus codec）。要支持得引入 `symphonia-adapter-libopus`。
+- **m4a/mp4 要求 `moov` 在文件前部。** ffmpeg 默认把 `moov` 写在文件末尾，symphonia 找不到。`ffmpeg -i in.m4a -c copy -movflags +faststart out.m4a` 转一下即可（`-c copy` 可以保留原编码）。
 - **时长的探测靠完整解码。** `probe_duration` 把文件解码一遍数采样，长文件会卡一下。更大的音乐库应该建库时批量探测并缓存。
 - **格式判定基于扩展名。** 一个 `.mp3` 扩展名里装的是 AAC 流这种情况，扫描时发现不了，只在播放时报解码错误。
 - **没有音频标签。** 曲名取自文件名，艺术家取自父目录名，不读 ID3/Vorbis 标签。
@@ -386,18 +387,18 @@ release.yml ──tag 推送触发──▶ 构建 5 个目标 → 校验产物�
 
 **版本号以谁为准**
 
-发布产物的版本号**永远等于 tag**。CI 构建时通过 `MS_VERSION` 环境变量注入，`build.rs` 把它编译进二进制（`--version` 读的就是它）。如果 `Cargo.toml` 和 tag 对不上，CI 只会给个 warning 提示，产物仍按 tag 走——不会出现"装完发现版本号不对"。
+发布产物的版本号**永远等于 tag**。CI 构建时通过 `MS_VERSION` 环境变量注入，`build.rs` 把它编译进二进制（`--version` 读的就是它）。如果 `Cargo.toml` 和 `build.rs` 的版本不一致，CI 会失败。
 
 本地构建时 `MS_VERSION` 没设，`build.rs` 退回用 `Cargo.toml` 里的版本号，所以本地 `cargo build` 的 `--version` 和 `Cargo.toml` 一致。
 
-  | 目标 | 产物 |
-  | --- | --- |
-  | `x86_64-unknown-linux-gnu` | `music-shell-x86_64-unknown-linux-gnu.tar.gz` |
-  | `aarch64-apple-darwin` | `music-shell-aarch64-apple-darwin.tar.gz` |
-  | `x86_64-apple-darwin` | `music-shell-x86_64-apple-darwin.tar.gz` |
-  | `x86_64-pc-windows-msvc` | `music-shell-x86_64-pc-windows-msvc.zip` |
+| 目标 | 产物 |
+| --- | --- |
+| `x86_64-unknown-linux-gnu` | `music-shell-x86_64-unknown-linux-gnu.tar.gz` |
+| `aarch64-apple-darwin` | `music-shell-aarch64-apple-darwin.tar.gz` |
+| `x86_64-apple-darwin` | `music-shell-x86_64-apple-darwin.tar.gz` |
+| `x86_64-pc-windows-msvc` | `music-shell-x86_64-pc-windows-msvc.zip` |
 
-没有 musl 静态版：rodio 走 cpal → `alsa-sys`，ALSA 是 glibc 专属的，交叉编译到 musl 需要自建 ALSA sysroot。与其发一个静态但发不出声的二进制，不如只发动态链接版（目标机器 `apt install libasound2` 即可）。
+没有 musl 静态版：rodio 走 cpal → `alsa-sys`，ALSA 是 glibc 专属的，交叉编译到 musl 需要自建 ALSA sysroot。与其发一个静态但发不出声的二进制，不如只发 glibc 版。
 
 触发一次发布：
 
