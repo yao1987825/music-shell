@@ -112,17 +112,29 @@ impl Renderer {
     pub fn draw(&mut self, view: &View) -> String {
         let (head, lyric, middle, tail) = render_parts(view);
         if self.drawn && head == self.last_head && tail == self.last_tail {
-            // 只有播放状态行变了：原地改那一行
-            if middle != self.last_middle {
+            let lyric_changed = lyric != self.last_lyric;
+            let middle_changed = middle != self.last_middle;
+
+            // 歌词和播放状态可能在同一帧里一起变动；不能先更新中间行再短路掉歌词。
+            if lyric_changed && middle_changed {
+                self.last_lyric = lyric.clone();
+                self.last_middle = middle.clone();
+                if !view.style.ansi {
+                    return format!("{head}{lyric}{middle}\n{tail}");
+                }
+                return format!("\x1b[2J\x1b[H{head}{lyric}{middle}\n{tail}");
+            }
+
+            if middle_changed {
                 self.last_middle = middle.clone();
                 if !view.style.ansi {
                     return format!("{middle}\n");
                 }
-                let row = head.lines().count() + 1;
+                let row = head.lines().count() + lyric.lines().count() + 1;
                 return format!("\x1b[s\x1b[{row};1H\x1b[2K{middle}\x1b[u");
             }
-            // 只有歌词变了（滚动或高亮切换）：原地改歌词区
-            if lyric != self.last_lyric {
+
+            if lyric_changed {
                 self.last_lyric = lyric.clone();
                 if !view.style.ansi {
                     return lyric.clone();
@@ -723,6 +735,66 @@ mod lyric_panel_tests {
         let lines: Vec<&str> = lyric.lines().collect();
         assert_eq!(lines.len(), 4, "3 行歌词 + 1 行分隔线");
         assert!(lines[1].trim().is_empty(), "空行要占位，否则后面的行会错位");
+    }
+
+    #[test]
+    fn lyric_and_status_changes_are_pushed_in_one_frame() {
+        let mut renderer = Renderer::default();
+        let view_a = View {
+            app_name: "x".into(),
+            theme: Theme::Dark,
+            style: Style::new(true),
+            width: 40,
+            height: 24,
+            backend: "静音模式",
+            title: "t".into(),
+            artist: "a".into(),
+            state: PlayState::Playing,
+            position_secs: 1,
+            duration_secs: 4,
+            volume: 70,
+            shuffle: false,
+            repeat: "off",
+            source: "s".into(),
+            status: String::new(),
+            input: String::new(),
+            rows: Vec::new(),
+            range: String::new(),
+            empty_hint: true,
+            lyric_lines: vec![Some("旧歌词".into())],
+            lyric_current: Some(0),
+            lyric_hint: None,
+        };
+        let view_b = View {
+            app_name: "x".into(),
+            theme: Theme::Dark,
+            style: Style::new(true),
+            width: 40,
+            height: 24,
+            backend: "静音模式",
+            title: "t".into(),
+            artist: "a".into(),
+            state: PlayState::Paused,
+            position_secs: 2,
+            duration_secs: 4,
+            volume: 70,
+            shuffle: false,
+            repeat: "off",
+            source: "s".into(),
+            status: String::new(),
+            input: String::new(),
+            rows: Vec::new(),
+            range: String::new(),
+            empty_hint: true,
+            lyric_lines: vec![Some("新歌词".into())],
+            lyric_current: Some(0),
+            lyric_hint: None,
+        };
+
+        renderer.draw(&view_a);
+        let out = renderer.draw(&view_b);
+        assert!(out.contains("新歌词"), "歌词更新应该一起刷新: {out}");
+        assert!(out.contains("已暂停"), "状态更新应该一起刷新: {out}");
     }
 
     #[test]
