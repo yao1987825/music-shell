@@ -120,6 +120,10 @@ pub struct Config {
     pub recent_playlists: Vec<String>,
     /// Alt+A 收歌进的自定义歌单名
     pub favorite_playlist: String,
+    /// 歌词文件集中存放的目录，为空时只看音频文件旁边
+    pub lyrics_dir: PathBuf,
+    /// 歌词面板显示几行，0 表示不显示
+    pub lyric_panel_lines: usize,
     pub window: Window,
 }
 
@@ -139,6 +143,8 @@ impl Default for Config {
             repeat: Repeat::Off,
             recent_playlists: Vec::new(),
             favorite_playlist: "我的".to_string(),
+            lyrics_dir: PathBuf::new(),
+            lyric_panel_lines: 5,
             window: Window::default(),
         }
     }

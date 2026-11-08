@@ -4,6 +4,7 @@ pub mod command;
 pub mod config;
 pub mod input;
 pub mod library;
+pub mod lyrics;
 pub mod player;
 pub mod renderer;
 pub mod update;

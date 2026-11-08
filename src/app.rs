@@ -10,6 +10,7 @@ use crate::command::Command;
 use crate::config::{Config, Repeat};
 use crate::input::{self, Input};
 use crate::library::{self, Library, Playlist, Track};
+use crate::lyrics::{self, Lyrics};
 use crate::player::{Player, State};
 use crate::renderer::{self, Renderer, Style, View};
 
@@ -17,6 +18,13 @@ pub const TICK: Duration = Duration::from_millis(200);
 
 /// 一页显示多少首曲目。左右键按页翻。
 pub const PAGE_SIZE: usize = 10;
+
+#[derive(Debug, Default, Clone)]
+pub struct LyricPanel {
+    pub lines: Vec<Option<String>>,
+    pub current: Option<usize>,
+    pub hint: Option<String>,
+}
 
 pub struct App {
     cfg: Config,
@@ -27,6 +35,10 @@ pub struct App {
     status: String,
     /// 正在输入、还没回车的那行命令，显示在提示符后面
     input: String,
+    /// 当前这首歌的歌词
+    lyrics: Lyrics,
+    /// 已经加载过歌词的文件，避免每首歌都重复读盘
+    lyrics_cache: std::collections::HashMap<PathBuf, Lyrics>,
     renderer: Renderer,
     style: Style,
 }
@@ -41,6 +53,8 @@ impl App {
             source: String::new(),
             status: String::new(),
             input: String::new(),
+            lyrics: Lyrics::default(),
+            lyrics_cache: std::collections::HashMap::new(),
             renderer: Renderer::default(),
             style: Style::detect(),
         };
@@ -91,6 +105,7 @@ impl App {
             };
             match self.player.play(&track) {
                 Ok(()) => {
+                    self.load_lyrics_for(&track);
                     self.status = if skipped.is_empty() {
                         format!("正在播放 {}", track.title)
                     } else {
@@ -116,6 +131,58 @@ impl App {
         } else {
             format!("全部无法播放：{}", skipped.join("、"))
         };
+    }
+
+    /// 读当前这首歌的歌词，按文件路径缓存
+    pub fn load_lyrics_for(&mut self, track: &Track) {
+        let lyrics_dir = self.cfg.lyrics_dir.clone();
+        let lyrics_dir = if lyrics_dir.as_os_str().is_empty() {
+            None
+        } else {
+            Some(lyrics_dir)
+        };
+        if let Some(cached) = self.lyrics_cache.get(&track.path) {
+            self.lyrics = cached.clone();
+            return;
+        }
+        let loaded = lyrics::load_lyrics(&track.path, lyrics_dir.as_deref());
+        self.lyrics_cache.insert(track.path.clone(), loaded.clone());
+        self.lyrics = loaded;
+    }
+
+    /// 歌词面板的内容：当前行前后各若干行
+    fn build_lyric_panel(&self) -> LyricPanel {
+        let lines_cfg = self.cfg.lyric_panel_lines;
+        if lines_cfg == 0 {
+            return LyricPanel::default();
+        }
+        if self.lyrics.is_empty() {
+            return LyricPanel {
+                lines: Vec::new(),
+                current: None,
+                hint: Some(lyric_hint(&self.cfg)),
+            };
+        }
+        let pos = self.player.position();
+        let before = lines_cfg.saturating_sub(1) / 2;
+        let after = lines_cfg.saturating_sub(1) - before;
+        let window = self.lyrics.window(pos, before, after);
+        let current = self.lyrics.current_in_window(pos, before, after);
+        LyricPanel {
+            lines: window
+                .into_iter()
+                .map(|l| {
+                    let text = l.text.trim();
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(text.to_string())
+                    }
+                })
+                .collect(),
+            current,
+            hint: None,
+        }
     }
 
     pub fn toggle_play(&mut self) {
@@ -562,6 +629,7 @@ impl App {
     }
 
     pub fn view(&self) -> View {
+        let panel = self.build_lyric_panel();
         let (title, artist) = match self.lib.current() {
             Some(t) => (t.title.clone(), t.artist.clone()),
             None => ("—".to_string(), String::new()),
@@ -623,6 +691,9 @@ impl App {
             empty_hint: len == 0,
             range,
             rows: list,
+            lyric_lines: panel.lines,
+            lyric_current: panel.current,
+            lyric_hint: panel.hint,
         }
     }
 
@@ -643,6 +714,15 @@ fn state_label(state: State) -> &'static str {
         State::Playing => "播放中",
         State::Paused => "已暂停",
     }
+}
+
+fn lyric_hint(cfg: &Config) -> String {
+    let dir = if cfg.lyrics_dir.as_os_str().is_empty() {
+        "音频文件旁边".to_string()
+    } else {
+        format!("{}", cfg.lyrics_dir.display())
+    };
+    format!("♪ 暂无歌词（把同名 .lrc 放在 {dir}）")
 }
 
 fn describe_failure(track: &Track, err: &anyhow::Error) -> String {

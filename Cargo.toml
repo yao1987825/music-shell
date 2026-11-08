@@ -19,6 +19,7 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 dirs = "7.0.0"
 flate2 = "1.1.10"
+lofty = "0.25.5"
 rand = "0.9"
 rodio = { version = "0.22", default-features = false, features = [
     "playback",

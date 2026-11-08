@@ -92,11 +92,17 @@ pub struct View {
     pub rows: Vec<Row>,
     pub range: String,
     pub empty_hint: bool,
+    /// 歌词面板：每一项是一行，None 表示空行占位
+    pub lyric_lines: Vec<Option<String>>,
+    /// 当前歌词行在面板里的下标
+    pub lyric_current: Option<usize>,
+    pub lyric_hint: Option<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct Renderer {
     last_head: String,
+    last_lyric: String,
     last_middle: String,
     last_tail: String,
     drawn: bool,
@@ -104,32 +110,51 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn draw(&mut self, view: &View) -> String {
-        let (head, middle, tail) = render_parts(view);
+        let (head, lyric, middle, tail) = render_parts(view);
         if self.drawn && head == self.last_head && tail == self.last_tail {
-            if middle == self.last_middle {
-                return String::new();
+            // 只有播放状态行变了：原地改那一行
+            if middle != self.last_middle {
+                self.last_middle = middle.clone();
+                if !view.style.ansi {
+                    return format!("{middle}\n");
+                }
+                let row = head.lines().count() + 1;
+                return format!("\x1b[s\x1b[{row};1H\x1b[2K{middle}\x1b[u");
             }
-            self.last_middle = middle.clone();
-            if !view.style.ansi {
-                return format!("{middle}\n");
+            // 只有歌词变了（滚动或高亮切换）：原地改歌词区
+            if lyric != self.last_lyric {
+                self.last_lyric = lyric.clone();
+                if !view.style.ansi {
+                    return lyric.clone();
+                }
+                let row = head.lines().count() + 1;
+                let lines = lyric.lines().count();
+                let mut out = format!("\x1b[s\x1b[{row};1H");
+                for i in 0..lines {
+                    out.push_str(&format!("\x1b[{};1H\x1b[2K", row + i));
+                }
+                out.push_str(&lyric);
+                out.push_str("\x1b[u");
+                return out;
             }
-            let row = head.lines().count() + 1;
-            return format!("\x1b[s\x1b[{row};1H\x1b[2K{middle}\x1b[u");
+            return String::new();
         }
         self.drawn = true;
         self.last_head = head.clone();
+        self.last_lyric = lyric.clone();
         self.last_middle = middle.clone();
         self.last_tail = tail.clone();
         if view.style.ansi {
-            format!("\x1b[2J\x1b[H{head}{middle}\n{tail}")
+            format!("\x1b[2J\x1b[H{head}{lyric}{middle}\n{tail}")
         } else {
-            format!("{head}{middle}\n{tail}")
+            format!("{head}{lyric}{middle}\n{tail}")
         }
     }
 
     pub fn reset(&mut self) {
         self.drawn = false;
         self.last_head.clear();
+        self.last_lyric.clear();
         self.last_middle.clear();
         self.last_tail.clear();
     }
@@ -155,7 +180,7 @@ pub fn help_text(theme: Theme) -> String {
     out.trim_end().to_string()
 }
 
-pub fn render_parts(view: &View) -> (String, String, String) {
+pub fn render_parts(view: &View) -> (String, String, String, String) {
     let theme = view.theme;
     let st = view.style;
     let width = view.width;
@@ -174,6 +199,32 @@ pub fn render_parts(view: &View) -> (String, String, String) {
     let now_playing = format!("{} — {}", view.title, view.artist);
     head.push_str(&st.paint(theme.strong(), &fit(&now_playing, width)));
     head.push('\n');
+
+    // 歌词面板夹在标题区和播放状态行之间
+    let mut lyric_block = String::new();
+    if !view.lyric_lines.is_empty() {
+        for (i, line) in view.lyric_lines.iter().enumerate() {
+            match line {
+                Some(text) => {
+                    let color = if Some(i) == view.lyric_current {
+                        theme.strong()
+                    } else {
+                        DIM
+                    };
+                    lyric_block.push_str(&st.paint(color, &fit(text, width)));
+                }
+                None => lyric_block.push_str(&" ".repeat(width)),
+            }
+            lyric_block.push('\n');
+        }
+        lyric_block.push_str(&st.paint(DIM, &rule(width)));
+        lyric_block.push('\n');
+    } else if let Some(hint) = &view.lyric_hint {
+        lyric_block.push_str(&st.paint(DIM, &fit(hint, width)));
+        lyric_block.push('\n');
+        lyric_block.push_str(&st.paint(DIM, &rule(width)));
+        lyric_block.push('\n');
+    }
 
     let middle = status_line(view);
 
@@ -227,12 +278,12 @@ pub fn render_parts(view: &View) -> (String, String, String) {
     if !view.input.is_empty() {
         tail.push_str(&st.paint(theme.strong(), &view.input));
     }
-    (head, middle, tail)
+    (head, lyric_block, middle, tail)
 }
 
 pub fn render(view: &View) -> String {
-    let (head, middle, tail) = render_parts(view);
-    format!("{head}{middle}\n{tail}")
+    let (head, lyric, middle, tail) = render_parts(view);
+    format!("{head}{lyric}{middle}\n{tail}")
 }
 
 /// 曲名下面那一行：播放状态 + 时间。
@@ -364,6 +415,9 @@ mod tests {
         let view = View {
             app_name: "x".into(),
             theme: Theme::Dark,
+            lyric_lines: Vec::new(),
+            lyric_current: None,
+            lyric_hint: None,
             style: Style::new(false),
             width: 60,
             height: 24,
@@ -395,6 +449,9 @@ mod tests {
         let view = View {
             app_name: "x".into(),
             theme: Theme::Dark,
+            lyric_lines: Vec::new(),
+            lyric_current: None,
+            lyric_hint: None,
             style: Style::new(false),
             width: 60,
             height: 24,
@@ -429,6 +486,9 @@ mod layout_tests {
         View {
             app_name: "music-shell".into(),
             theme: Theme::Dark,
+            lyric_lines: Vec::new(),
+            lyric_current: None,
+            lyric_hint: None,
             style: Style::new(ansi),
             width,
             height: 24,
@@ -534,6 +594,9 @@ mod status_tests {
         View {
             app_name: "x".into(),
             theme: Theme::Dark,
+            lyric_lines: Vec::new(),
+            lyric_current: None,
+            lyric_hint: None,
             style: Style::new(true),
             width: 60,
             height: 24,
@@ -597,5 +660,79 @@ mod status_tests {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod lyric_panel_tests {
+    use super::*;
+
+    fn view_with_lyrics(lines: Vec<Option<String>>, current: Option<usize>) -> View {
+        View {
+            app_name: "x".into(),
+            theme: Theme::Dark,
+            style: Style::new(true),
+            width: 40,
+            height: 24,
+            backend: "静音模式",
+            title: "t".into(),
+            artist: "a".into(),
+            state: PlayState::Playing,
+            position_secs: 1,
+            duration_secs: 4,
+            volume: 70,
+            shuffle: false,
+            repeat: "off",
+            source: "s".into(),
+            status: String::new(),
+            input: String::new(),
+            rows: Vec::new(),
+            range: String::new(),
+            empty_hint: true,
+            lyric_lines: lines,
+            lyric_current: current,
+            lyric_hint: None,
+        }
+    }
+
+    #[test]
+    fn the_lyric_panel_is_rendered_between_head_and_middle() {
+        let view = view_with_lyrics(vec![Some("第一行".into()), Some("第二行".into())], Some(1));
+        let (head, lyric, middle, tail) = render_parts(&view);
+        assert!(head.contains("x"), "head 里应有应用名");
+        assert!(
+            lyric.contains("第一行") && lyric.contains("第二行"),
+            "歌词区内容不对: {lyric}"
+        );
+        assert!(middle.contains("正在播放"), "middle 应是播放状态行");
+        assert!(tail.contains("音乐库为空"), "tail 应是列表区");
+    }
+
+    #[test]
+    fn the_current_line_is_highlighted_and_others_are_dim() {
+        let view = view_with_lyrics(vec![Some("一".into()), Some("二".into())], Some(1));
+        let (_, lyric, _, _) = render_parts(&view);
+        let strong = lyric.matches(theme_strong()).count();
+        assert_eq!(strong, 1, "应该只有当前行是高亮色");
+    }
+
+    #[test]
+    fn blank_lyric_lines_are_padded_to_keep_the_alignment() {
+        let view = view_with_lyrics(vec![Some("一".into()), None, Some("三".into())], Some(2));
+        let (_, lyric, _, _) = render_parts(&view);
+        let lines: Vec<&str> = lyric.lines().collect();
+        assert_eq!(lines.len(), 4, "3 行歌词 + 1 行分隔线");
+        assert!(lines[1].trim().is_empty(), "空行要占位，否则后面的行会错位");
+    }
+
+    #[test]
+    fn no_lyrics_means_no_lyric_block() {
+        let view = view_with_lyrics(Vec::new(), None);
+        let (_, lyric, _, _) = render_parts(&view);
+        assert!(lyric.is_empty());
+    }
+
+    fn theme_strong() -> &'static str {
+        Theme::Dark.strong()
     }
 }
